@@ -35,7 +35,7 @@ src/ui.js             Extension UI shell
 src/protocol.js       Shared browser-side protocol constants
 ```
 
-The matching VPS service lives in the sibling `sillytavern-multiplayer-relay` repository.
+The matching relay service lives in the sibling `sillytavern-multiplayer-relay` repository. The V1 execution plan for both repositories is maintained at `sillytavern-multiplayer-relay/docs/V1-PLAN.md`.
 
 ## Status
 
