@@ -45,7 +45,10 @@ export const EventType = Object.freeze({
     GENERATION_FINISHED: 'generation.finished',
 });
 
-/** 错误帧 payload.code 的取值。必须与 relay 的 src/core/protocol.ts 一致；UI 据此显示中文文案。 */
+/**
+ * 错误帧 payload.code 的取值。必须与 relay 的 src/core/protocol.ts 一致；UI 据此显示中文文案。
+ * UNAUTHORIZED / ASSET_* / RATE_LIMITED 由 HTTP 资产通道（M2.5）使用，JSON 错误形如 { error, code }。
+ */
 export const ErrorCode = Object.freeze({
     BAD_PAYLOAD: 'BAD_PAYLOAD',
     NOT_AUTHENTICATED: 'NOT_AUTHENTICATED',
@@ -61,6 +64,11 @@ export const ErrorCode = Object.freeze({
     NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
     UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
     INTERNAL: 'INTERNAL',
+    UNAUTHORIZED: 'UNAUTHORIZED',
+    ASSET_NOT_FOUND: 'ASSET_NOT_FOUND',
+    ASSET_TOO_LARGE: 'ASSET_TOO_LARGE',
+    UNSUPPORTED_ASSET_TYPE: 'UNSUPPORTED_ASSET_TYPE',
+    RATE_LIMITED: 'RATE_LIMITED',
 });
 
 export function createCommand(type, payload = {}) {
