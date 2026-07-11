@@ -39,5 +39,5 @@ The matching relay service lives in the sibling `sillytavern-multiplayer-relay` 
 
 ## Status
 
-This is the initial scaffold. The UI shell and module boundaries exist; room commands and host chat bridging are implemented in subsequent milestones.
+Phase P0 (protocol and connection layer) is complete: the command vocabulary and invite-code utilities live in `src/protocol.js`, and `src/relay-client.js` provides request/ack correlation, automatic reconnection with exponential backoff, and heartbeat-based dead-connection detection (validated by `scripts/smoke-client.mjs`). Room UI (P1) and host chat bridging (P2) follow per `docs/V1-PLAN.md`.
 

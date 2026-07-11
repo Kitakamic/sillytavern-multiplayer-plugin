@@ -25,6 +25,12 @@ export function mountMultiplayerPanel({ settings, relay, saveSettings }) {
                     <input id="st-multiplayer-display-name" class="text_pole" type="text" maxlength="32">
                 </div>
                 <div class="stmp-row">
+                    <label class="checkbox_label" for="st-multiplayer-reconnect">
+                        <input id="st-multiplayer-reconnect" type="checkbox">
+                        <span>断线自动重连</span>
+                    </label>
+                </div>
+                <div class="stmp-row">
                     <button id="st-multiplayer-connect" class="menu_button">连接 Relay</button>
                     <span id="st-multiplayer-status">未连接</span>
                 </div>
@@ -34,6 +40,7 @@ export function mountMultiplayerPanel({ settings, relay, saveSettings }) {
 
     panel.find('#st-multiplayer-relay-url').val(settings.relayUrl);
     panel.find('#st-multiplayer-display-name').val(settings.displayName);
+    panel.find('#st-multiplayer-reconnect').prop('checked', settings.reconnect);
 
     panel.find('#st-multiplayer-relay-url').on('input', function () {
         settings.relayUrl = String($(this).val()).trim();
@@ -41,6 +48,11 @@ export function mountMultiplayerPanel({ settings, relay, saveSettings }) {
     });
     panel.find('#st-multiplayer-display-name').on('input', function () {
         settings.displayName = String($(this).val()).trim();
+        saveSettings();
+    });
+    panel.find('#st-multiplayer-reconnect').on('change', function () {
+        settings.reconnect = $(this).prop('checked');
+        relay.reconnectEnabled = settings.reconnect;
         saveSettings();
     });
     panel.find('#st-multiplayer-connect').on('click', () => {
@@ -52,7 +64,7 @@ export function mountMultiplayerPanel({ settings, relay, saveSettings }) {
     });
 
     relay.addEventListener('statechange', (event) => {
-        const labels = { idle: '未连接', connecting: '正在连接', connected: '已连接', disconnected: '连接已断开' };
+        const labels = { idle: '未连接', connecting: '正在连接', connected: '已连接', reconnecting: '正在重连', disconnected: '连接已断开' };
         panel.find('#st-multiplayer-status').text(labels[event.detail] ?? event.detail);
     });
     relay.addEventListener('error', () => toastr.error('无法连接到 Relay。', '联机酒馆'));

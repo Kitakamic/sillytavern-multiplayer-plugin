@@ -21,6 +21,7 @@
 
 | 命令 | 发起方 | 说明 |
 |---|---|---|
+| `relay.ping` | 所有人 | 传输层心跳/连通性检测（客户端心跳与冒烟测试使用） |
 | `auth.hello` | 所有人 | 连接后自报协议版本、昵称、恢复凭据 |
 | `room.create` | 房主 | 建房 |
 | `room.join` | 客人 | 凭邀请码入房 |
@@ -37,14 +38,14 @@
 
 ## 3. 阶段任务
 
-### P0 — 协议与连接层（与总计划 M1–M2 并行推进）
+### P0 — 协议与连接层（✅ 完成于 2026-07-11）
 
-- [ ] `protocol.js`：补齐上表标"新增"的命令常量；新增邀请码编解码工具 `parseInviteCode()` / （房主侧）`createInviteCode()`，格式 `{v, relayUrl, roomId, token}` 的 base64url JSON。
-- [ ] `relay-client.js`：
-  - [ ] `request(command)` 返回 Promise，按 `requestId` 关联 ack/error，带超时；
-  - [ ] 自动重连：指数退避（1s 起、上限 30s、可配置开关沿用 `settings.reconnect`），重连成功后自动发 `room.resume`；
-  - [ ] 心跳（`relay.ping`）与死连接检测。
-- [ ] **验收**：对着 relay 开发服务器，断网 10 秒后自动恢复连接并完成 resume，无需人工点击。
+- [x] `protocol.js`：补齐上表标"新增"的命令常量（含 `relay.ping`）；新增邀请码编解码工具 `parseInviteCode()` / `createInviteCode()`，格式 `{v, relayUrl, roomId, token}` 的 base64url JSON（Unicode 安全）。
+- [x] `relay-client.js`：
+  - [x] `request(command)` 返回 Promise，按 `requestId` 关联 ack/error，带超时；error 帧转为 reject；
+  - [x] 自动重连：指数退避（1s 起、上限 30s、带抖动，`settings.reconnect` 开关接入 UI 复选框），重连成功后经 `resumeProvider` 钩子自动发 `room.resume`；连接建立失败单独兜底（部分 WebSocket 实现被拒时只发 error 不发 close）+ 8s 连接超时；
+  - [x] 心跳（`relay.ping`，25s 间隔 / 5s 超时）与死连接检测（超时强制断开进入重连路径）。
+- [x] **验收**：`scripts/smoke-client.mjs` 通过——邀请码往返/非法拒绝、连接、请求关联、中继被杀后自动重连并恢复 ping。`room.resume` 完整闭环待 M2 服务端实现后复验（客户端钩子已就位）。
 
 ### P1 — 客人体验（对应总计划 M3）
 

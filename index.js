@@ -26,6 +26,7 @@ function initialize() {
     const settings = getExtensionSettings(context);
     const store = new RoomStore();
     const relay = new RelayClient();
+    relay.reconnectEnabled = settings.reconnect;
     const hostBridge = createHostBridge(context);
 
     mountMultiplayerPanel({
