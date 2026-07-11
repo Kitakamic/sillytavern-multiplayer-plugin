@@ -27,6 +27,12 @@
     flex: 0 0 auto;
 }
 
+#stmp-window .menu_button:disabled {
+    opacity: 0.5;
+    cursor: default;
+    pointer-events: none;
+}
+
 #st-multiplayer-status {
     color: var(--SmartThemeBodyColor, inherit);
     font-size: 0.9em;

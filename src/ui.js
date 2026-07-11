@@ -77,6 +77,7 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
     let importedSaveAssetId = null;
     let importedSaveFileName = null;
     let saveImportScheduled = false;
+    let syncingAll = false;
 
     function helloPayload() {
         const payload = { displayName: settings.displayName || '玩家' };
@@ -381,6 +382,32 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         });
     }
 
+    /**
+     * 房主本地是否有生成在跑。streamingProcessor 只覆盖流式；
+     * #mes_stop（生成期间可见的停止按钮）兜底非流式。
+     */
+    function hostIsGenerating() {
+        const context = globalThis.SillyTavern?.getContext?.();
+        if (context?.streamingProcessor && !context.streamingProcessor.isFinished) return true;
+        return $('#mes_stop').is(':visible');
+    }
+
+    /** 一键同步：同一瞬间快照当前卡 + 当前聊天，先卡后存档发布，消除两次点击间的错位窗口。 */
+    async function syncAllToRoom() {
+        if (syncingAll) return null;
+        if (hostIsGenerating()) throw new Error('AI 正在生成，等这条回复完成后再同步。');
+        syncingAll = true;
+        render();
+        try {
+            const card = await shareCurrentCard();
+            const save = await shareCurrentSave();
+            return { card, save };
+        } finally {
+            syncingAll = false;
+            render();
+        }
+    }
+
     // ---------- 设置抽屉 ----------
     const panel = $(`
         <div id="${PANEL_ID}" class="inline-drawer">
@@ -464,6 +491,10 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                     <div class="stmp-section stmp-room-meta">
                         <div class="stmp-room-line"></div>
                         <div class="stmp-generating" style="display: none;">⚙️ 房主正在生成……</div>
+                    </div>
+                    <div class="stmp-section stmp-sync-section" style="display: none;">
+                        <button class="stmp-sync-all menu_button">一键同步（角色卡 + 存档）</button>
+                        <div class="stmp-sync-note stmp-empty">把当前打开的卡和聊天进度同步给全体成员，开局前点一次即可。</div>
                     </div>
                     <div class="stmp-section stmp-invite-section" style="display: none;">
                         <div class="stmp-section-title">邀请码</div>
@@ -696,6 +727,20 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         await importSharedCard(store.snapshot.sharedCard, true);
     }));
 
+    windowEl.find('.stmp-sync-all').on('click', guarded(async () => {
+        if (!store.snapshot.sharedCard && !store.snapshot.sharedSave) {
+            const confirmed = window.confirm(
+                '一键同步会把当前角色卡和当前聊天的完整存档共享给房间成员，成员端会自动切换过去。确定吗？',
+            );
+            if (!confirmed) return;
+        }
+        const result = await syncAllToRoom();
+        if (!result) return;
+        const cardMsg = result.card.unchanged ? '角色卡未变化' : `角色卡已共享：${result.card.characterName}`;
+        const saveMsg = result.save.unchanged ? '存档未变化' : `存档已共享（${result.save.messageCount} 条消息）`;
+        toastr.success(`${cardMsg}；${saveMsg}。`, '联机酒馆');
+    }));
+
     windowEl.find('.stmp-save-share').on('click', guarded(async () => {
         if (!store.snapshot.sharedSave) {
             const confirmed = window.confirm(
@@ -761,6 +806,9 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
 
         windowEl.find('.stmp-invite-section').toggle(isHost && Boolean(lastInviteCode));
         windowEl.find('.stmp-invite-out').val(lastInviteCode);
+
+        windowEl.find('.stmp-sync-section').toggle(isHost);
+        windowEl.find('.stmp-sync-all').prop('disabled', syncingAll).text(syncingAll ? '正在同步……' : '一键同步（角色卡 + 存档）');
 
         const sharedCard = snapshot.sharedCard;
         windowEl.find('.stmp-card-host').toggle(isHost);
