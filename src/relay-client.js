@@ -158,7 +158,10 @@ export class RelayClient extends EventTarget {
             if (message.kind === 'ack') {
                 entry.resolve(message);
             } else {
-                entry.reject(new Error(message.payload?.message ?? '中继返回错误。'));
+                // 携带机器可读错误码，UI 据此映射中文文案。
+                const error = new Error(message.payload?.message ?? '中继返回错误。');
+                error.code = message.payload?.code;
+                entry.reject(error);
             }
         }
 
@@ -218,7 +221,9 @@ export class RelayClient extends EventTarget {
         try {
             const payload = await this.resumeProvider();
             if (!payload) return;
-            await this.request(createCommand(CommandType.ROOM_RESUME, payload));
+            const ack = await this.request(createCommand(CommandType.ROOM_RESUME, payload));
+            // 房间层监听 'resumed' 以应用应答中的快照与增量事件。
+            this.dispatchEvent(new CustomEvent('resumed', { detail: ack }));
         } catch (error) {
             this.dispatchEvent(new CustomEvent('resumeerror', { detail: error }));
         }

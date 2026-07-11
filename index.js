@@ -8,6 +8,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     relayUrl: '',
     displayName: '',
     reconnect: true,
+    /** auth.hello 颁发的恢复凭据 { clientId, sessionToken }；仅用于断线重连恢复席位。 */
+    credentials: null,
 });
 
 function getExtensionSettings(context) {

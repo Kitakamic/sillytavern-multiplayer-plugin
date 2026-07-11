@@ -1,7 +1,12 @@
-// 插件连接层冒烟测试（Node 22+，利用全局 WebSocket 直接驱动浏览器端模块）。
+// 插件冒烟测试（Node 22+，利用全局 WebSocket 直接驱动浏览器端模块）。
+// 第一部分：连接层（P0）——邀请码、连接、请求关联、可选重连验证。
+// 第二部分：数据层（P1）——双客户端 RoomStore 全流程（需中继房主密钥）。
 // 用法: node scripts/smoke-client.mjs [wsUrl]           （默认 ws://127.0.0.1:3001/ws）
 // 环境: RELAY_SMOKE_WAIT_RECONNECT=1 → 首次 ping 后等待外部重启中继，验证自动重连。
+//       RELAY_CREATOR_KEY=...        → 房主密钥；缺省时读同级 relay 仓库 data/local-relay-state.json。
+import { readFileSync } from 'node:fs';
 import { RelayClient } from '../src/relay-client.js';
+import { RoomStore } from '../src/room-store.js';
 import { CommandType, createCommand, createInviteCode, parseInviteCode } from '../src/protocol.js';
 
 const wsUrl = process.argv[2] ?? 'ws://127.0.0.1:3001/ws';
@@ -11,21 +16,11 @@ function fail(message) {
     process.exit(1);
 }
 
-const invite = { relayUrl: 'wss://relay.example.com/ws', roomId: 'room-42', token: 'tok_abc' };
-const decoded = parseInviteCode(createInviteCode(invite));
-if (JSON.stringify(decoded) !== JSON.stringify(invite)) fail('invite code roundtrip mismatch');
-console.log('PASS invite code roundtrip');
-
-try {
-    parseInviteCode('this-is-not-an-invite!!!');
-    fail('invalid invite code was accepted');
-} catch {
-    console.log('PASS invalid invite rejected');
+function pass(label) {
+    console.log(`PASS ${label}`);
 }
 
-const client = new RelayClient();
-
-function waitState(state, timeoutMs = 15000) {
+function waitState(client, state, timeoutMs = 15000) {
     return new Promise((resolve, reject) => {
         if (client.state === state) return resolve();
         const timer = setTimeout(() => reject(new Error(`timeout waiting for state '${state}'`)), timeoutMs);
@@ -39,13 +34,37 @@ function waitState(state, timeoutMs = 15000) {
     });
 }
 
+async function until(predicate, label, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    fail(`timeout waiting: ${label}`);
+}
+
+// ---------- P0：连接层 ----------
+
+const invite = { relayUrl: 'wss://relay.example.com/ws', roomId: 'room-42', token: 'tok_abc' };
+const decoded = parseInviteCode(createInviteCode(invite));
+if (JSON.stringify(decoded) !== JSON.stringify(invite)) fail('invite code roundtrip mismatch');
+pass('invite code roundtrip');
+
+try {
+    parseInviteCode('this-is-not-an-invite!!!');
+    fail('invalid invite code was accepted');
+} catch {
+    pass('invalid invite rejected');
+}
+
+const client = new RelayClient();
 client.connect(wsUrl);
-await waitState('connected').catch((error) => fail(error.message));
-console.log('PASS connected');
+await waitState(client, 'connected').catch((error) => fail(error.message));
+pass('connected');
 
 const ack = await client.request(createCommand(CommandType.RELAY_PING)).catch((error) => fail(`ping failed: ${error.message}`));
 if (ack.type !== 'relay.ping.ack') fail(`unexpected ping reply: ${JSON.stringify(ack)}`);
-console.log('PASS request/ack correlation');
+pass('request/ack correlation');
 
 if (process.env.RELAY_SMOKE_WAIT_RECONNECT === '1') {
     console.log('WAITING for external relay restart...');
@@ -59,9 +78,144 @@ if (process.env.RELAY_SMOKE_WAIT_RECONNECT === '1') {
 
     const ack2 = await client.request(createCommand(CommandType.RELAY_PING)).catch((error) => fail(`post-reconnect ping failed: ${error.message}`));
     if (ack2.type !== 'relay.ping.ack') fail(`unexpected post-reconnect reply: ${JSON.stringify(ack2)}`);
-    console.log('PASS auto-reconnect + post-reconnect ping');
+    pass('auto-reconnect + post-reconnect ping');
 }
 
 client.disconnect();
+
+// ---------- P1：数据层（双客户端 RoomStore 全流程）----------
+
+function loadCreatorKey() {
+    if (process.env.RELAY_CREATOR_KEY) return process.env.RELAY_CREATOR_KEY;
+    try {
+        const stateUrl = new URL('../../sillytavern-multiplayer-relay/data/local-relay-state.json', import.meta.url);
+        const parsed = JSON.parse(readFileSync(stateUrl, 'utf8'));
+        if (typeof parsed.creatorKey === 'string' && parsed.creatorKey) return parsed.creatorKey;
+    } catch { /* fall through */ }
+    fail('creator key unavailable: set RELAY_CREATOR_KEY or start the sibling local relay once');
+}
+
+/** 模拟 ui.js 控制层的最小玩家：RelayClient + RoomStore + hello/resume 接线。 */
+class Player {
+    constructor(name) {
+        this.name = name;
+        this.creds = null;
+        this.client = new RelayClient();
+        this.client.reconnectEnabled = false;
+        this.store = new RoomStore();
+        this.client.addEventListener('message', (event) => {
+            if (event.detail?.kind === 'event') this.store.applyEvent(event.detail);
+        });
+    }
+
+    async connect() {
+        this.client.connect(wsUrl);
+        await waitState(this.client, 'connected');
+    }
+
+    async hello() {
+        const payload = { displayName: this.name, ...(this.creds ?? {}) };
+        const reply = await this.client.request(createCommand(CommandType.AUTH_HELLO, payload));
+        this.creds = { clientId: reply.payload.clientId, sessionToken: reply.payload.sessionToken };
+        return reply;
+    }
+
+    /** 与 ui.js 的 applyResume 相同的恢复路径。 */
+    async resume() {
+        const reply = await this.client.request(createCommand(CommandType.ROOM_RESUME, {
+            lastAppliedSeq: this.store.inRoom ? this.store.lastAppliedSeq : 0,
+        }));
+        const payload = reply.payload;
+        if (!this.store.inRoom || this.store.snapshot.room.roomId !== payload.roomId) {
+            this.store.seedRoom({
+                roomId: payload.roomId,
+                role: payload.role,
+                selfClientId: this.creds.clientId,
+                members: payload.members,
+                generating: payload.generating,
+            });
+        } else {
+            this.store.syncPresence({ members: payload.members, generating: payload.generating });
+        }
+        for (const event of payload.events ?? []) this.store.applyEvent(event);
+        return reply;
+    }
+}
+
+const creatorKey = loadCreatorKey();
+
+const host = new Player('房主');
+await host.connect();
+await host.hello();
+const created = await host.client.request(createCommand(CommandType.ROOM_CREATE, { creatorKey }));
+const roomId = created.payload.roomId;
+const roomInvite = createInviteCode({ relayUrl: wsUrl, roomId, token: created.payload.inviteToken });
+await host.resume();
+if (!host.store.inRoom || host.store.role !== 'host') fail('host store not seeded as host');
+pass('host creates room and seeds store via resume');
+
+const guest = new Player('客人');
+await guest.connect();
+await guest.hello();
+const parsedInvite = parseInviteCode(roomInvite);
+await guest.client.request(createCommand(CommandType.ROOM_JOIN, { roomId: parsedInvite.roomId, token: parsedInvite.token }));
+await guest.resume();
+if (guest.store.snapshot.members.length !== 2) fail('guest store does not see both members');
+await until(() => host.store.snapshot.members.length === 2, 'host sees guest in member projection');
+pass('guest joins via invite; both member projections converge');
+
+await guest.client.request(createCommand(CommandType.PROPOSAL_SUBMIT, { text: '我推门而入。' }));
+await until(() => host.store.snapshot.proposals.some((p) => p.status === 'pending'), 'host store shows pending proposal');
+pass('proposal reaches host projection as pending');
+
+const pendingId = host.store.snapshot.proposals[0].proposalId;
+await host.client.request(createCommand(CommandType.PROPOSAL_ACCEPT, { proposalId: pendingId }));
+await until(() => guest.store.snapshot.proposals[0]?.status === 'accepted', 'guest store shows accepted');
+pass('acceptance reflected in author projection');
+
+await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
+    text: '我推门而入。', authorName: '客人', role: 'user', proposalId: pendingId,
+}));
+await until(() => guest.store.snapshot.timeline.length === 1, 'guest timeline has the story message');
+pass('story message lands in timeline projection');
+
+await guest.client.request(createCommand(CommandType.SIDECHAT_MESSAGE_POST, { text: '这里好玩！' }));
+await until(() => host.store.snapshot.sidechat.length === 1, 'host sidechat projection updated');
+pass('sidechat converges on both sides');
+
+// seq 缺口 → desync 事件 → resume 兜底不产生重复
+let desynced = false;
+guest.store.addEventListener('desync', () => { desynced = true; }, { once: true });
+const gapApplied = guest.store.applyEvent({
+    v: 1, kind: 'event', type: 'story.message.published', eventId: 'synthetic', roomId,
+    seq: guest.store.lastAppliedSeq + 5,
+    payload: { message: { messageId: 'synthetic', authorName: 'x', role: 'user', text: 'gap', publishedAt: 0 } },
+});
+if (gapApplied !== false || !desynced) fail('seq gap did not trigger desync');
+if (guest.store.snapshot.timeline.length !== 1) fail('gapped event was applied');
+await guest.resume();
+if (guest.store.snapshot.timeline.length !== 1) fail('resume after desync duplicated timeline');
+pass('seq gap triggers desync; resume recovers without duplicates');
+
+// 断线期间的推进经重连 + resume 追平，无缺失无重复
+guest.client.disconnect();
+await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '风把门吹开了。', authorName: '角色', role: 'assistant' }));
+await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '（旁白推进）', authorName: '角色', role: 'assistant' }));
+await guest.connect();
+const rehello = await guest.hello();
+if (rehello.payload.room?.roomId !== roomId) fail('hello did not report resumable room');
+await guest.resume();
+await until(() => guest.store.snapshot.timeline.length === 3, 'guest timeline caught up to 3');
+const seqs = guest.store.snapshot.timeline.map((m) => m.seq);
+if (new Set(seqs).size !== seqs.length) fail('timeline contains duplicate seq');
+pass('offline progress recovered via hello+resume (no gap, no dup)');
+
+// 房主离房 → 客人端投影收到关房
+await host.client.request(createCommand(CommandType.ROOM_LEAVE));
+await until(() => guest.store.snapshot.closedReason === 'host_left', 'guest store sees room closed');
+pass('room closure propagates to guest projection');
+
+host.client.disconnect();
+guest.client.disconnect();
 console.log('CLIENT SMOKE OK');
 process.exit(0);

@@ -22,3 +22,201 @@
     opacity: 0.82;
 }
 
+/* ---------- 浮动控制中心 ---------- */
+
+#stmp-window {
+    position: fixed;
+    top: 60px;
+    right: 20px;
+    z-index: 3000;
+    width: 340px;
+    min-width: 280px;
+    min-height: 200px;
+    max-height: 85vh;
+    resize: both;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.5));
+    border-radius: 8px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(30, 30, 30, 0.95));
+    color: var(--SmartThemeBodyColor, inherit);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(6px);
+}
+
+#stmp-window .stmp-window-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    cursor: move;
+    user-select: none;
+    touch-action: none;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.35));
+    flex: 0 0 auto;
+}
+
+#stmp-window .stmp-window-title {
+    font-weight: bold;
+}
+
+#stmp-window .stmp-window-conn {
+    font-size: 0.85em;
+    opacity: 0.75;
+    margin-left: auto;
+}
+
+#stmp-window .stmp-window-close {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1.1em;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    opacity: 0.8;
+}
+
+#stmp-window .stmp-window-body {
+    padding: 0.6rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    flex: 1 1 auto;
+}
+
+#stmp-window .stmp-view-lobby,
+#stmp-window .stmp-view-room {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+}
+
+#stmp-window .stmp-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+#stmp-window .stmp-section-title {
+    font-weight: bold;
+    font-size: 0.92em;
+    opacity: 0.9;
+}
+
+#stmp-window .stmp-lobby-note {
+    font-size: 0.88em;
+    opacity: 0.75;
+}
+
+#stmp-window .stmp-generating {
+    font-size: 0.9em;
+    animation: stmp-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes stmp-pulse {
+    50% { opacity: 0.45; }
+}
+
+#stmp-window .stmp-member {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+#stmp-window .stmp-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+}
+
+#stmp-window .stmp-online { background-color: #3fbf5f; }
+#stmp-window .stmp-offline { background-color: #888888; }
+
+#stmp-window .stmp-member-role {
+    font-size: 0.8em;
+    opacity: 0.7;
+}
+
+#stmp-window .stmp-mini {
+    font-size: 0.78em;
+    padding: 0.1rem 0.45rem;
+    margin-left: auto;
+}
+
+#stmp-window .stmp-member .stmp-mini,
+#stmp-window .stmp-proposal-actions .stmp-mini {
+    margin-left: 0;
+}
+
+#stmp-window .stmp-member > .stmp-kick {
+    margin-left: auto;
+}
+
+#stmp-window .stmp-proposal {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.3));
+    border-radius: 6px;
+    padding: 0.35rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+#stmp-window .stmp-proposal-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+#stmp-window .stmp-proposal-text-view {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+#stmp-window .stmp-proposal-reason {
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+#stmp-window .stmp-proposal-actions {
+    display: flex;
+    gap: 0.4rem;
+}
+
+#stmp-window .stmp-empty {
+    font-size: 0.88em;
+    opacity: 0.6;
+}
+
+#stmp-window .stmp-sidechat,
+#stmp-window .stmp-timeline {
+    max-height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.9em;
+}
+
+#stmp-window .stmp-chatline {
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+#stmp-window .stmp-chat-author {
+    opacity: 0.8;
+    font-weight: bold;
+}
+
+#stmp-window .stmp-timeline-details > summary {
+    cursor: pointer;
+    font-size: 0.9em;
+    opacity: 0.8;
+}
+
+#stmp-window .stmp-room-actions {
+    justify-content: flex-end;
+}
