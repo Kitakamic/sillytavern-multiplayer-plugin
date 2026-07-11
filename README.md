@@ -11,7 +11,7 @@ Each participant keeps their own local SillyTavern instance. This extension conn
 - A private WSS Relay for invitations, room membership, ordering, and reconnects.
 - Host-only writes to the selected local chat and host-only AI generation.
 
-V1 deliberately excludes attachments, voice, host migration, peer-to-peer generation, and automatic writes to a guest's native SillyTavern chat.
+V1 deliberately excludes general attachments, voice, host migration, peer-to-peer generation, and any writes to a guest's own chats or characters. The guest-side story can render in a dedicated plugin-managed mirror chat, and the host may explicitly share the character card to the room (see `docs/V1-PLAN.md`, phase P3).
 
 ## Development installation
 
