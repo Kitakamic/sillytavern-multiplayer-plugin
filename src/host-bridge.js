@@ -190,25 +190,36 @@ export function createHostBridge(contextProvider) {
         return true;
     }
 
-    /** 权威消息到达 → 原地定稿；final 传 null → 生成失败，移除气泡。 */
+    /**
+     * 权威消息到达 → 定稿；final 传 null → 生成失败，移除气泡。
+     * 气泡若已不在末尾（生成期间有人插话），定稿时移到末尾——
+     * 权威顺序里 assistant 排在本回合全部发言之后。
+     */
     function endStreamBubble(final) {
         const bubble = findStreamBubble();
         streamBubbleId = null;
         if (!bubble) return false;
         const context = getContext();
-        if (final) {
+        const isLast = bubble.index === context.chat.length - 1;
+        if (final && isLast) {
             bubble.message.mes = final.text;
             if (final.name) bubble.message.name = final.name;
             bubble.message.extra = { stmpMessageId: final.messageId, stmpAuthor: final.name ?? bubble.message.name };
             context.updateMessageBlock?.(bubble.index, bubble.message);
         } else {
             context.chat.splice(bubble.index, 1);
-            // 移除中段消息后整页重绘（clearChat + printMessages，均经 getContext 暴露）。
+            if (final) {
+                bubble.message.mes = final.text;
+                if (final.name) bubble.message.name = final.name;
+                bubble.message.extra = { stmpMessageId: final.messageId, stmpAuthor: final.name ?? bubble.message.name };
+                context.chat.push(bubble.message);
+            }
+            // 中段增删后整页重绘（clearChat + printMessages，均经 getContext 暴露）。
             try {
                 context.clearChat?.();
                 context.printMessages?.();
             } catch (error) {
-                console.warn('[ST Multiplayer] 移除流式气泡后的重绘失败：', error);
+                console.warn('[ST Multiplayer] 流式气泡整理后的重绘失败：', error);
             }
         }
         void Promise.resolve(context.saveChat()).catch(() => { /* 尽力而为 */ });
