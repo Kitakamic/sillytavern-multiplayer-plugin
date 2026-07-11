@@ -1,4 +1,5 @@
 import { CommandType, EventType, createCommand, createInviteCode, parseInviteCode } from './protocol.js';
+import { createKickCommand } from './kick-command.js';
 
 const PANEL_ID = 'st-multiplayer-panel';
 const WINDOW_ID = 'stmp-window';
@@ -547,10 +548,13 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
 
     // 提案/成员列表内的动态按钮走事件委托。
     windowEl.on('click', '.stmp-kick', guarded(async function () {
-        const clientId = $(this).data('client-id');
-        const name = $(this).data('name');
+        const command = createKickCommand({
+            targetClientId: this.getAttribute('data-client-id'),
+            selfClientId: store.snapshot.room?.selfClientId,
+        });
+        const name = this.getAttribute('data-name') || '该成员';
         if (!window.confirm(`确定把 ${name} 移出房间吗？`)) return;
-        await relay.request(createCommand(CommandType.ROOM_KICK, { clientId }));
+        await relay.request(command);
     }));
     windowEl.on('click', '.stmp-accept', guarded(async function () {
         await relay.request(createCommand(CommandType.PROPOSAL_ACCEPT, { proposalId: $(this).data('proposal-id') }));
