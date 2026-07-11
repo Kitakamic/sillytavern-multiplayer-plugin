@@ -23,6 +23,35 @@ export const CommandType = Object.freeze({
     GENERATION_FINISH: 'generation.finish',
 });
 
+/**
+ * 事件词汇表（中继 → 客户端）。必须与 relay 的 src/core/protocol.ts 一致；
+ * 信封为 {v, kind:'event', type, eventId, roomId, seq, payload}，seq 在房间内单调递增。
+ */
+export const EventType = Object.freeze({
+    ROOM_MEMBER_JOINED: 'room.member.joined',
+    ROOM_MEMBER_LEFT: 'room.member.left',
+    ROOM_MEMBER_ONLINE: 'room.member.online',
+    ROOM_MEMBER_OFFLINE: 'room.member.offline',
+    ROOM_CLOSED: 'room.closed',
+});
+
+/** 错误帧 payload.code 的取值。必须与 relay 的 src/core/protocol.ts 一致；UI 据此显示中文文案。 */
+export const ErrorCode = Object.freeze({
+    BAD_PAYLOAD: 'BAD_PAYLOAD',
+    NOT_AUTHENTICATED: 'NOT_AUTHENTICATED',
+    ALREADY_IN_ROOM: 'ALREADY_IN_ROOM',
+    NOT_IN_ROOM: 'NOT_IN_ROOM',
+    CREATOR_KEY_INVALID: 'CREATOR_KEY_INVALID',
+    ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
+    ROOM_FULL: 'ROOM_FULL',
+    INVITE_INVALID: 'INVITE_INVALID',
+    FORBIDDEN: 'FORBIDDEN',
+    TARGET_NOT_FOUND: 'TARGET_NOT_FOUND',
+    NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
+    UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
+    INTERNAL: 'INTERNAL',
+});
+
 export function createCommand(type, payload = {}) {
     return {
         v: PROTOCOL_VERSION,

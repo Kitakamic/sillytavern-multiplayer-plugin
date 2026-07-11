@@ -36,6 +36,20 @@
 | `sidechat.message.post` | 所有人 | 副聊天发言（**新增**） |
 | `generation.start` / `generation.progress` / `generation.finish` | 房主 | AI 生成状态广播，供客人端显示"生成中" |
 
+### 2.1 事件词汇表（中继 → 客户端，M1 起）
+
+事件信封为 `{v, kind:'event', type, eventId, roomId, seq, payload}`，`seq` 在房间内单调递增（插件 `RoomStore.applyEvent()` 直接读顶层 `seq` 去重）。两侧 protocol 文件中的 `EventType` 必须与本表一致。
+
+| 事件 | payload | 说明 |
+|---|---|---|
+| `room.member.joined` | `{ member: {clientId, displayName, role, joinedAt} }` | 成员加入（含房主建房时的自身加入，作为 seq 1） |
+| `room.member.left` | `{ clientId, reason: 'left' \| 'kicked' }` | 成员离开或被踢（踢人事件先广播后移除，被踢者能收到） |
+| `room.member.online` | `{ clientId }` | 成员断线重连（`auth.hello` 携带恢复凭据） |
+| `room.member.offline` | `{ clientId }` | 成员掉线（连接断开但保留席位） |
+| `room.closed` | `{ reason: 'host_left' \| 'expired' }` | 房间关闭（房主离房即关房，V1 决定） |
+
+错误帧携带机器可读的 `payload.code`（两侧 protocol 的 `ErrorCode`，如 `INVITE_INVALID`、`FORBIDDEN`、`ROOM_FULL`），UI 据此映射中文文案；`payload.message` 为英文日志文案，不面向用户展示。
+
 ## 3. 阶段任务
 
 ### P0 — 协议与连接层（✅ 完成于 2026-07-11）
