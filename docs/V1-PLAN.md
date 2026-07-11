@@ -37,7 +37,7 @@
 | `story.message.publish` | 所有成员 | 直接向共享时间线发言（`role: 'user'`）；`role: 'assistant'`（AI 回复）仅房主可发 |
 | `sidechat.message.post` | 所有人 | 副聊天发言（不进故事、不进 prompt，**新增**） |
 | `round.ready` | 所有成员 | 回合就绪信号（`state: 'ready' \| 'skip' \| 'clear'`），纯信息性，帮助房主决定何时触发生成 |
-| `generation.start` / `generation.progress` / `generation.finish` | 房主 | AI 生成状态广播，供客人端显示"生成中"（progress 将承载流式文本快照，P2） |
+| `generation.start` / `generation.progress` / `generation.finish` | 房主 | AI 生成状态广播；progress 携带节流的流式全文快照（`text` ≤16000 字符，护 WS 64KB 帧上限） |
 
 ### 2.1 事件词汇表（中继 → 客户端，M1 起）
 
@@ -57,7 +57,7 @@
 | `story.message.published` | `{ message: {messageId, authorClientId, authorName, role: 'user'\|'assistant', text, publishedAt} }` | 成员的直连发言或房主发布的 AI 回复；`authorClientId` 标识发言人，`authorName` 为其角色名。assistant 消息落地即回合边界（客户端据此清空就绪状态） |
 | `sidechat.message.posted` | `{ message: {messageId, authorClientId, authorDisplayName, text, postedAt} }` | 副聊天发言（文本 ≤2000 字符；故事文本 ≤8000） |
 | `round.ready.changed` | `{ clientId, state: 'ready'\|'skip'\|'clear' }` | **瞬态**回合就绪信号（无 seq、不入日志）；重连丢失无后果 |
-| `generation.started` / `generation.progressed` / `generation.finished` | `{}` / `{ charCount? }` / `{ ok }` | 瞬态生成状态广播（无 seq） |
+| `generation.started` / `generation.progressed` / `generation.finished` | `{}` / `{ charCount?, text? }` / `{ ok }` | 瞬态生成状态广播（无 seq）；`text` 为节流的流式全文快照，客机渲染实时气泡 |
 
 错误帧携带机器可读的 `payload.code`（两侧 protocol 的 `ErrorCode`，如 `INVITE_INVALID`、`FORBIDDEN`），UI 据此映射中文文案；`payload.message` 为英文日志文案，不面向用户展示。
 
@@ -102,14 +102,14 @@
 
 > **改版决定（2026-07-12）：删除审核模式。** 游玩循环定稿：AI 回复落地 → 自由输入期（成员经 `story.message.publish` 直接发言，全员实时可见，relay seq 全序仲裁）→ 成员发"我说完了/跳过"就绪信号（`round.ready`，瞬态）→ 房主收束触发生成。"全员就绪自动生成"只是房主端本地自动化（替房主按按钮），协议无分支。角色区分在消息层：`name`/`force_avatar` 按发言人角色名署名，AI 通过 prompt 内的名字前缀区分玩家（instruct include names / CC names_behavior）；`{{user}}` 宏绑定房主 persona 的局限由卡片措辞与作者注释缓解。
 
-- [ ] `host-bridge.js` 铁律：只通过 `SillyTavern.getContext()` 访问酒馆能力，禁止 import 酒馆内部模块路径。
-- [ ] `getBinding()` 扩展为显式"绑定当前聊天"操作：房主选定后锁定 chatId，切换聊天时给出警告而不是静默跟随。
-- [ ] 成员消息写入：房主端收到非自己发出的 `story.message.published`（user 角色）后写入绑定聊天，`name` 用发言人角色名、`force_avatar` 对齐其头像；写入失败在面板报错并可重试。
-- [ ] 生成触发：房主"让 AI 回复"按钮 + 房主输入框"发送并生成"合并按钮（生成中置灰）；桥接 `generation.start/finish` 广播；`STREAM_TOKEN_RECEIVED` 节流（约 300ms）经 `generation.progress` 转发流式文本快照（逼近 WS 64KB 帧上限时降级）；完成后把 AI 回复以 assistant 角色发布到时间线。
-- [ ] 就绪计数：面板"本回合已就绪 n/m"（信号与投影已实现）；可选房主本地开关"全员就绪自动生成"（含短缓冲）。
-- [ ] 一致性：显式"重新同步" = 一键同步（角色卡 + 联机存档快照，已实现）；房主编辑/删除/swipe 后手动触发，V1 不做自动监听。
-- [ ] `index.js` 版本护栏：启动时探测所需 `getContext()` API 是否齐全，缺失则在面板显示明确错误并禁用功能，而非静默失败；维护 `manifest.json` 的 `minimum_client_version`。
-- [ ] **验收**：完整一局跑通（多成员自由发言 → 写入房主聊天 → 房主收束生成 → 流式输出全员可见 → 权威回复落时间线并清空就绪状态）；解绑聊天后所有写入操作被拒绝。
+- [x] `host-bridge.js` 铁律：只通过 `SillyTavern.getContext()` 访问酒馆能力，禁止 import 酒馆内部模块路径。（2026-07-12 实现：contextProvider 每次取新鲜 context）
+- [x] `getBinding()` 扩展为显式"绑定当前聊天"操作：`bindCurrentChat()` 由"一键同步"触发，锁定 chatId + 角色 avatar；绑定聊天未打开时同步区显示 ⚠ 警告而不是静默跟随，离房/关房自动解绑。
+- [x] 成员消息写入：房主端收到 `story.message.published`（user 角色）后写入绑定聊天（push/渲染同步、落盘异步，事件顺序 = 聊天顺序），`name` 用发言人角色名，`extra.stmpMessageId` 打标幂等（重放/重连/补写安全）；绑定聊天未打开时暂缓，`catchUp()` 在生成前按时间线补写。`force_avatar` 头像对齐留待头像通道接入。
+- [x] 生成触发：房主"🤖 让 AI 回复"按钮 + 故事输入框"发送并生成"合并按钮（生成中置灰）；`generation.start/finish` 广播；`STREAM_TOKEN_RECEIVED`（携带累计全文，script.js:3754）300ms 节流经 `generation.progress` 转发全文快照（16000 字符上限护 WS 64KB 帧）；生成完成轮询捕获新 assistant 消息并以 assistant 角色发布（超 8000 字截断并提示）。客机时间线渲染脉动的流式气泡（`generatingText` 投影）。
+- [x] 就绪计数：面板"本回合已就绪 n/m"（信号与投影已实现）。"全员就绪自动生成"（房主本地开关 + 短缓冲）列为可选后续，不阻塞验收。
+- [x] 一致性：显式"重新同步" = 一键同步（角色卡 + 联机存档快照）；房主编辑/删除/swipe 后手动触发，V1 不做自动监听。
+- [x] `index.js` 版本护栏：启动时经 `hostBridge.missingApis()` 探测所需 `getContext()` 成员，缺失则 console + toastr 明确报错（UI 仍挂载，房主操作调用时给出具体错误）；`manifest.json` 的 `minimum_client_version` 维持 1.16.0。
+- [ ] **验收**：完整一局跑通（多成员自由发言 → 写入房主聊天 → 房主收束生成 → 流式输出全员可见 → 权威回复落时间线并清空就绪状态）；解绑聊天后所有写入操作被拒绝。（代码完成于 2026-07-12；数据层与协议已由两侧冒烟脚本验证，剩余 SillyTavern 真机双人一局手测）
 
 ### P3 — 镜像聊天模式（客人故事主界面，V1 主路线；2026-07-11 改版）
 

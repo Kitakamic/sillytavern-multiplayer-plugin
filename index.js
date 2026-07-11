@@ -39,10 +39,18 @@ function initialize() {
     const store = new RoomStore();
     const relay = new RelayClient();
     relay.reconnectEnabled = settings.reconnect;
-    const hostBridge = createHostBridge(context);
     const contextProvider = () => globalThis.SillyTavern?.getContext?.();
+    const hostBridge = createHostBridge(contextProvider);
     const cardSharing = new CharacterCardSharing(contextProvider);
     const saveSharing = new ChatSaveSharing(contextProvider);
+
+    // 版本护栏（P2）：getContext() 暴露面探测。缺 API 时明确报错而非静默失败；
+    // UI 仍然挂载，房主功能在调用时会给出具体错误。
+    const missingApis = hostBridge.missingApis();
+    if (missingApis.length) {
+        console.error('[ST Multiplayer] getContext() 缺少所需 API：', missingApis);
+        toastr.error(`酒馆版本过旧或内部 API 变动，联机的房主功能不可用（缺少：${missingApis.join(', ')}）。`, '联机酒馆');
+    }
 
     mountMultiplayerPanel({
         settings,

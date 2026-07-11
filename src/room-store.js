@@ -11,6 +11,8 @@ function initialState() {
         /** 本回合就绪状态：clientId → 'ready' | 'skip'。AI 回复落地即清空（回合边界）。 */
         ready: {},
         generating: false,
+        /** 生成中的流式全文快照（generation.progressed 瞬态事件驱动；结束清空）。 */
+        generatingText: null,
         /** 本端离房原因：'left' | 'kicked' | 'host_left' | 'expired'，用于 UI 提示。 */
         closedReason: null,
         lastAppliedSeq: 0,
@@ -167,12 +169,15 @@ export class RoomStore extends EventTarget {
                 break;
             case EventType.GENERATION_STARTED:
                 state.generating = true;
+                state.generatingText = '';
                 break;
             case EventType.GENERATION_FINISHED:
                 state.generating = false;
+                state.generatingText = null;
                 break;
             case EventType.GENERATION_PROGRESSED:
-                break; // V1 只关心起止
+                if (typeof payload.text === 'string') state.generatingText = payload.text;
+                break;
             default:
                 break; // 未知事件：seq 已推进，安全忽略（前向兼容）
         }

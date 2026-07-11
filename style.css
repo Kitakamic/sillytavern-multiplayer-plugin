@@ -219,6 +219,11 @@
     white-space: pre-wrap;
 }
 
+#stmp-window .stmp-streamline {
+    opacity: 0.85;
+    animation: stmp-pulse 1.6s ease-in-out infinite;
+}
+
 #stmp-window .stmp-chat-author {
     opacity: 0.8;
     font-weight: bold;

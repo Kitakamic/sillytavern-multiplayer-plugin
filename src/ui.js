@@ -43,7 +43,7 @@ function errorText(error) {
     return ERROR_TEXT[error?.code] ?? error?.message ?? '未知错误。';
 }
 
-export function mountMultiplayerPanel({ settings, store, relay, cardSharing, saveSharing, saveSettings }) {
+export function mountMultiplayerPanel({ settings, store, relay, hostBridge, cardSharing, saveSharing, saveSettings }) {
     if ($(`#${PANEL_ID}`).length) return;
 
     const container = $('#extensions_settings2').length ? $('#extensions_settings2') : $('#extensions_settings');
@@ -384,19 +384,52 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         return $('#mes_stop').is(':visible');
     }
 
-    /** 一键同步：同一瞬间快照当前卡 + 当前聊天，先卡后存档发布，消除两次点击间的错位窗口。 */
+    /** 一键同步：绑定当前聊天为写入目标，随后原子快照当前卡 + 当前聊天发布。 */
     async function syncAllToRoom() {
         if (syncingAll) return null;
         if (hostIsGenerating()) throw new Error('AI 正在生成，等这条回复完成后再同步。');
         syncingAll = true;
         render();
         try {
+            const binding = hostBridge.bindCurrentChat();
             const card = await shareCurrentCard();
             const save = await shareCurrentSave();
-            return { card, save };
+            return { binding, card, save };
         } finally {
             syncingAll = false;
             render();
+        }
+    }
+
+    /** 房主收束回合：补写遗漏的成员发言 → 触发生成 → 流式转发 → 发布权威回复。 */
+    async function hostGenerate() {
+        if (store.role !== 'host') throw new Error('只有房主可以触发生成。');
+        if (!hostBridge.isBound()) throw new Error('请先点"一键同步"绑定当前聊天。');
+        if (!hostBridge.isBoundChatOpen()) throw new Error('绑定的聊天未打开，请切回后重试。');
+        if (hostBridge.generating || hostIsGenerating()) throw new Error('AI 正在生成中。');
+
+        hostBridge.catchUp(store.snapshot.timeline);
+        await relay.request(createCommand(CommandType.GENERATION_START));
+        let ok = false;
+        try {
+            const reply = await hostBridge.generateReply({
+                onProgress: (text) => {
+                    void relay.request(createCommand(CommandType.GENERATION_PROGRESS, {
+                        text: text.slice(0, 16000),
+                        charCount: text.length,
+                    })).catch(() => { /* 流式预览丢帧无所谓 */ });
+                },
+            });
+            if (!reply) throw new Error('生成结束，但没有捕获到 AI 回复（可能被中止）。');
+            if (reply.text.length > 8000) toastr.warning('AI 回复超过 8000 字，共享时间线中已截断（房主本地聊天完整）。', '联机酒馆');
+            await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
+                text: reply.text.slice(0, 8000),
+                authorName: reply.name || '角色',
+                role: 'assistant',
+            }));
+            ok = true;
+        } finally {
+            await relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })).catch(() => { /* 尽力而为 */ });
         }
     }
 
@@ -542,11 +575,15 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                         <div class="stmp-section-title">故事发言</div>
                         <div class="stmp-story-editor">
                             <textarea class="stmp-story-text text_pole" rows="2" placeholder="以你的角色行动/发言（全员实时可见，Ctrl+Enter 发送）……"></textarea>
-                            <button class="stmp-story-send menu_button">发送</button>
+                            <div class="stmp-row">
+                                <button class="stmp-story-send menu_button">发送</button>
+                                <button class="stmp-story-send-gen menu_button" style="display: none;">发送并生成</button>
+                            </div>
                         </div>
                         <div class="stmp-row stmp-round-row">
                             <button class="stmp-round-ready menu_button stmp-mini">我说完了</button>
                             <button class="stmp-round-skip menu_button stmp-mini">跳过本回合</button>
+                            <button class="stmp-generate menu_button stmp-mini" style="display: none;">🤖 让 AI 回复</button>
                             <span class="stmp-round-count"></span>
                         </div>
                     </div>
@@ -679,16 +716,27 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         toastr.success('邀请码已复制。', '联机酒馆');
     }));
 
-    windowEl.find('.stmp-story-send').on('click', guarded(async () => {
+    async function sendStoryText() {
         const text = String(windowEl.find('.stmp-story-text').val()).trim();
-        if (!text) throw new Error('发言内容不能为空。');
+        if (!text) return false;
         await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
             text,
             authorName: settings.personaName || settings.displayName || '玩家',
             role: 'user',
         }));
         windowEl.find('.stmp-story-text').val('');
+        return true;
+    }
+
+    windowEl.find('.stmp-story-send').on('click', guarded(async () => {
+        const sent = await sendStoryText();
+        if (!sent) throw new Error('发言内容不能为空。');
     }));
+    windowEl.find('.stmp-story-send-gen').on('click', guarded(async () => {
+        await sendStoryText();
+        await hostGenerate();
+    }));
+    windowEl.find('.stmp-generate').on('click', guarded(hostGenerate));
     windowEl.find('.stmp-story-text').on('keydown', (event) => {
         if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) windowEl.find('.stmp-story-send').trigger('click');
     });
@@ -818,6 +866,17 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
 
         windowEl.find('.stmp-sync-section').toggle(isHost);
         windowEl.find('.stmp-sync-all').prop('disabled', syncingAll).text(syncingAll ? '正在同步……' : '一键同步（角色卡 + 存档）');
+        if (isHost) {
+            const binding = hostBridge.binding;
+            windowEl.find('.stmp-sync-note').text(!binding
+                ? '把当前打开的卡和聊天进度同步给全体成员，同时绑定为联机写入目标。'
+                : hostBridge.isBoundChatOpen()
+                    ? `已绑定聊天：${binding.characterName} / ${binding.chatId}`
+                    : `⚠ 绑定的聊天（${binding.characterName} / ${binding.chatId}）未打开——成员发言暂缓写入，切回或生成前会自动补写。`);
+        }
+
+        windowEl.find('.stmp-story-send-gen').toggle(isHost).prop('disabled', snapshot.generating);
+        windowEl.find('.stmp-generate').toggle(isHost).prop('disabled', snapshot.generating);
 
         const sharedCard = snapshot.sharedCard;
         windowEl.find('.stmp-card-host').toggle(isHost);
@@ -908,6 +967,13 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
             $('<span class="stmp-chat-text">').text(message.text).appendTo(row);
             timeline.append(row);
         }
+        // 流式气泡：生成期间实时刷新的 AI 全文快照，权威消息落地后由上面的循环替代。
+        if (snapshot.generating) {
+            const row = $('<div class="stmp-chatline stmp-streamline">');
+            $('<span class="stmp-chat-author">').text('[AI·生成中] ').appendTo(row);
+            $('<span class="stmp-chat-text">').text(snapshot.generatingText || '……').appendTo(row);
+            timeline.append(row);
+        }
         timeline.scrollTop(timeline[0].scrollHeight);
     }
 
@@ -946,10 +1012,28 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         return { lastAppliedSeq: store.lastAppliedSeq };
     };
 
-    store.addEventListener('change', () => render());
+    store.addEventListener('change', () => {
+        // 离房/关房后绑定失效，避免下一局误写上一局的聊天。
+        if (!store.inRoom && hostBridge.isBound()) hostBridge.unbind();
+        render();
+    });
     store.addEventListener('event', (event) => {
         if ([EventType.ROOM_CARD_UPDATED, EventType.ROOM_CARD_CLEARED].includes(event.detail.type)) scheduleSharedCardImport();
         if ([EventType.ROOM_CHAT_UPDATED, EventType.ROOM_CHAT_CLEARED].includes(event.detail.type)) scheduleSharedSaveImport();
+
+        // 房主：成员的 user 发言按事件顺序写入绑定聊天（extra 标记幂等；
+        // 绑定聊天未打开时先攒着，生成前 catchUp 补写）。
+        if (event.detail.type === EventType.STORY_MESSAGE_PUBLISHED
+            && event.detail.payload?.message?.role === 'user'
+            && store.role === 'host'
+            && hostBridge.isBound()) {
+            const message = event.detail.payload.message;
+            hostBridge.writeUserMessage({
+                messageId: message.messageId,
+                authorName: message.authorName,
+                text: message.text,
+            });
+        }
     });
     store.addEventListener('desync', () => {
         console.warn('[ST Multiplayer] 事件序列出现缺口，触发 room.resume 兜底。');
