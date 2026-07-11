@@ -1,0 +1,43 @@
+# SillyTavern Multiplayer Plugin
+
+Private, friend-focused multiplayer rooms for SillyTavern.
+
+Each participant keeps their own local SillyTavern instance. This extension connects outward to a private VPS Relay over WSS. The Relay coordinates rooms and shared story events; the host's local SillyTavern remains the only source of AI generation and the full private prompt context.
+
+## V1 scope
+
+- Host-reviewed text actions for 2–6 friends.
+- A plugin-side shared story timeline, proposal queue, and side chat.
+- A private WSS Relay for invitations, room membership, ordering, and reconnects.
+- Host-only writes to the selected local chat and host-only AI generation.
+
+V1 deliberately excludes attachments, voice, host migration, peer-to-peer generation, and automatic writes to a guest's native SillyTavern chat.
+
+## Development installation
+
+Clone this repository into the local user's third-party extensions directory, for example:
+
+```text
+SillyTavern/data/default-user/extensions/sillytavern-multiplayer-plugin
+```
+
+Then reload SillyTavern and enable the extension. During development, configure the Relay URL in the extension panel.
+
+## Layout
+
+```text
+index.js              Extension entry point
+manifest.json         SillyTavern extension manifest
+src/relay-client.js   WSS connection and reconnect boundary
+src/room-store.js     Local read-only room projection
+src/host-bridge.js    Host-only bridge to the native ST chat and generation APIs
+src/ui.js             Extension UI shell
+src/protocol.js       Shared browser-side protocol constants
+```
+
+The matching VPS service lives in the sibling `sillytavern-multiplayer-relay` repository.
+
+## Status
+
+This is the initial scaffold. The UI shell and module boundaries exist; room commands and host chat bridging are implemented in subsequent milestones.
+

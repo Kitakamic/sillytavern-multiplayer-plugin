@@ -1,0 +1,24 @@
+#st-multiplayer-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    margin: 0.5rem 0;
+}
+
+#st-multiplayer-panel .stmp-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+#st-multiplayer-panel .stmp-row > input {
+    flex: 1;
+    min-width: 0;
+}
+
+#st-multiplayer-status {
+    color: var(--SmartThemeBodyColor, inherit);
+    font-size: 0.9em;
+    opacity: 0.82;
+}
+

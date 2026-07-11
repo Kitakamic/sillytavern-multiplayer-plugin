@@ -1,0 +1,11 @@
+{
+  "name": "sillytavern-multiplayer-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private multiplayer rooms for SillyTavern",
+  "scripts": {
+    "check": "node --check index.js && node --check src/host-bridge.js && node --check src/protocol.js && node --check src/relay-client.js && node --check src/room-store.js && node --check src/ui.js"
+  }
+}
+
