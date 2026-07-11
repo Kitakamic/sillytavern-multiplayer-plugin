@@ -10,6 +10,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     reconnect: true,
     /** auth.hello 颁发的恢复凭据 { clientId, sessionToken }；仅用于断线重连恢复席位。 */
     credentials: null,
+    /** 悬浮球位置 { left, top }（px）；null 表示使用默认位置。 */
+    ballPos: null,
 });
 
 function getExtensionSettings(context) {

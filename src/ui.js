@@ -204,7 +204,6 @@ export function mountMultiplayerPanel({ settings, store, relay, saveSettings }) 
                 </div>
                 <div class="stmp-row">
                     <button id="st-multiplayer-connect" class="menu_button">连接 Relay</button>
-                    <button id="st-multiplayer-open" class="menu_button">联机面板</button>
                     <span id="st-multiplayer-status">未连接</span>
                 </div>
             </div>
@@ -233,9 +232,6 @@ export function mountMultiplayerPanel({ settings, store, relay, saveSettings }) 
             .then(() => toastr.success('已连接到中继。', '联机酒馆'))
             .catch((error) => toastr.error(errorText(error), '联机酒馆'));
         windowEl.show();
-    });
-    panel.find('#st-multiplayer-open').on('click', () => {
-        windowEl.toggle();
         render();
     });
 
@@ -332,6 +328,71 @@ export function mountMultiplayerPanel({ settings, store, relay, saveSettings }) 
 
     windowEl.find('.stmp-window-close').on('click', () => windowEl.hide());
 
+    // ---------- 悬浮球 ----------
+    const ballEl = $(`
+        <div id="stmp-ball" data-state="idle" title="联机酒馆">
+            <i class="fa-solid fa-circle-nodes"></i>
+            <span class="stmp-ball-dot"></span>
+        </div>
+    `);
+    $(document.body).append(ballEl);
+
+    function clampBallPos(left, top) {
+        const size = ballEl[0].offsetWidth || 44;
+        return {
+            left: Math.min(Math.max(0, left), window.innerWidth - size),
+            top: Math.min(Math.max(0, top), window.innerHeight - size),
+        };
+    }
+
+    function applyBallPos() {
+        if (!settings.ballPos) return;
+        const pos = clampBallPos(settings.ballPos.left, settings.ballPos.top);
+        ballEl.css({ left: `${pos.left}px`, top: `${pos.top}px`, right: 'auto' });
+    }
+
+    applyBallPos();
+    window.addEventListener('resize', applyBallPos);
+
+    // 拖动换位；位移小于阈值视为点击，切换控制中心。
+    (() => {
+        const ball = ballEl[0];
+        const DRAG_THRESHOLD_PX = 5;
+        let drag = null;
+        ball.addEventListener('pointerdown', (event) => {
+            const rect = ball.getBoundingClientRect();
+            drag = {
+                dx: event.clientX - rect.left,
+                dy: event.clientY - rect.top,
+                startX: event.clientX,
+                startY: event.clientY,
+                moved: false,
+            };
+            ball.setPointerCapture(event.pointerId);
+        });
+        ball.addEventListener('pointermove', (event) => {
+            if (!drag) return;
+            if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
+            drag.moved = true;
+            const pos = clampBallPos(event.clientX - drag.dx, event.clientY - drag.dy);
+            ballEl.css({ left: `${pos.left}px`, top: `${pos.top}px`, right: 'auto' });
+        });
+        ball.addEventListener('pointerup', () => {
+            if (!drag) return;
+            const wasDrag = drag.moved;
+            drag = null;
+            if (wasDrag) {
+                const rect = ball.getBoundingClientRect();
+                settings.ballPos = { left: rect.left, top: rect.top };
+                saveSettings();
+                return;
+            }
+            windowEl.toggle();
+            if (windowEl.is(':visible')) render();
+        });
+        ball.addEventListener('pointercancel', () => { drag = null; });
+    })();
+
     // ---------- 操作绑定 ----------
     function guarded(action) {
         return () => action().catch((error) => toastr.error(errorText(error), '联机酒馆'));
@@ -405,6 +466,8 @@ export function mountMultiplayerPanel({ settings, store, relay, saveSettings }) 
         const connLabel = STATE_LABELS[relay.state] ?? relay.state;
         windowEl.find('.stmp-window-conn').text(connLabel);
         panel.find('#st-multiplayer-status').text(connLabel);
+        ballEl.attr('data-state', relay.state);
+        ballEl.attr('title', `联机酒馆 · ${connLabel}`);
 
         const inRoom = snapshot.room !== null;
         windowEl.find('.stmp-view-lobby').toggle(!inRoom);

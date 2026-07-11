@@ -5,15 +5,26 @@
     margin: 0.5rem 0;
 }
 
-#st-multiplayer-panel .stmp-row {
+#st-multiplayer-panel .stmp-row,
+#stmp-window .stmp-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
 }
 
-#st-multiplayer-panel .stmp-row > input {
+#st-multiplayer-panel .stmp-row > input,
+#stmp-window .stmp-row > input {
     flex: 1;
     min-width: 0;
+}
+
+/* 酒馆的 .menu_button 是 width: min-content，中文会逐字竖排；这里改回横排。 */
+#st-multiplayer-panel .menu_button,
+#stmp-window .menu_button {
+    width: auto;
+    white-space: nowrap;
+    margin: 0;
+    flex: 0 0 auto;
 }
 
 #st-multiplayer-status {
@@ -219,4 +230,58 @@
 
 #stmp-window .stmp-room-actions {
     justify-content: flex-end;
+}
+
+/* ---------- 悬浮球 ---------- */
+
+#stmp-ball {
+    position: fixed;
+    right: 12px;
+    top: 55%;
+    z-index: 2999;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15em;
+    cursor: pointer;
+    user-select: none;
+    touch-action: none;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.5));
+    background-color: var(--SmartThemeBlurTintColor, rgba(30, 30, 30, 0.95));
+    color: var(--SmartThemeBodyColor, inherit);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(6px);
+    opacity: 0.88;
+}
+
+#stmp-ball:hover {
+    opacity: 1;
+}
+
+#stmp-ball .stmp-ball-dot {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background-color: #888888;
+    border: 1px solid rgba(0, 0, 0, 0.45);
+}
+
+#stmp-ball[data-state="connected"] .stmp-ball-dot {
+    background-color: #3fbf5f;
+}
+
+#stmp-ball[data-state="connecting"] .stmp-ball-dot,
+#stmp-ball[data-state="reconnecting"] .stmp-ball-dot {
+    background-color: #e8b93c;
+    animation: stmp-pulse 1.6s ease-in-out infinite;
+}
+
+#stmp-ball[data-state="disconnected"] .stmp-ball-dot {
+    background-color: #d9534f;
 }

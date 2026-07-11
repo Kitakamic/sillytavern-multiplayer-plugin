@@ -7,6 +7,7 @@ function initialState() {
         proposals: [], // [{ proposalId, authorClientId, authorDisplayName, text, submittedAt, status, reason? }]
         timeline: [], // [{ messageId, authorName, role, text, proposalId?, publishedAt, seq }]
         sidechat: [], // [{ messageId, authorClientId, authorDisplayName, text, postedAt }]
+        sharedCard: null, // { assetId, characterName, bytes, expiresAt, sharedAt }
         generating: false,
         /** 本端离房原因：'left' | 'kicked' | 'host_left' | 'expired'，用于 UI 提示。 */
         closedReason: null,
@@ -120,6 +121,18 @@ export class RoomStore extends EventTarget {
                 this.#state = { ...initialState(), closedReason: payload.reason ?? 'host_left' };
                 break;
             }
+            case EventType.ROOM_CARD_UPDATED:
+                state.sharedCard = {
+                    assetId: payload.assetId,
+                    characterName: payload.characterName,
+                    bytes: payload.bytes,
+                    expiresAt: payload.expiresAt,
+                    sharedAt: payload.sharedAt,
+                };
+                break;
+            case EventType.ROOM_CARD_CLEARED:
+                if (!state.sharedCard || state.sharedCard.assetId === payload.assetId) state.sharedCard = null;
+                break;
             case EventType.PROPOSAL_SUBMITTED: {
                 const proposal = { ...payload.proposal, status: 'pending' };
                 const index = state.proposals.findIndex((p) => p.proposalId === proposal.proposalId);
