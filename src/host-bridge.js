@@ -33,7 +33,9 @@ export function createHostBridge(contextProvider) {
     function missingApis() {
         const context = getContext();
         if (!context) return ['getContext'];
-        return REQUIRED_APIS.filter((name) => context[name] === undefined || context[name] === null);
+        // 用属性存在性判断，不看值：chatId 等值型成员在没打开聊天时
+        // 合法地是 undefined，但键仍在 context 上——那不是 API 缺失。
+        return REQUIRED_APIS.filter((name) => !(name in context));
     }
 
     function isBound() {
