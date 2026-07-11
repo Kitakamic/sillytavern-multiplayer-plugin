@@ -4,11 +4,12 @@ function initialState() {
     return {
         room: null, // { roomId, role, selfClientId }
         members: [], // [{ clientId, displayName, role, joinedAt, online }]
-        proposals: [], // [{ proposalId, authorClientId, authorDisplayName, text, submittedAt, status, reason? }]
-        timeline: [], // [{ messageId, authorName, role, text, proposalId?, publishedAt, seq }]
+        timeline: [], // [{ messageId, authorClientId, authorName, role, text, publishedAt, seq }]
         sidechat: [], // [{ messageId, authorClientId, authorDisplayName, text, postedAt }]
         sharedCard: null, // { assetId, characterName, bytes, expiresAt, sharedAt, cardKey?, contentHash? }
         sharedSave: null, // { assetId, chatName, messageCount, bytes, expiresAt, sharedAt, saveKey?, contentHash? }
+        /** 本回合就绪状态：clientId → 'ready' | 'skip'。AI 回复落地即清空（回合边界）。 */
+        ready: {},
         generating: false,
         /** 本端离房原因：'left' | 'kicked' | 'host_left' | 'expired'，用于 UI 提示。 */
         closedReason: null,
@@ -107,6 +108,7 @@ export class RoomStore extends EventTarget {
             }
             case EventType.ROOM_MEMBER_LEFT: {
                 state.members = state.members.filter((m) => m.clientId !== payload.clientId);
+                delete state.ready[payload.clientId];
                 if (payload.clientId === state.room.selfClientId) {
                     this.#state = { ...initialState(), closedReason: payload.reason === 'kicked' ? 'kicked' : 'left' };
                 }
@@ -151,27 +153,17 @@ export class RoomStore extends EventTarget {
             case EventType.ROOM_CHAT_CLEARED:
                 if (!state.sharedSave || state.sharedSave.assetId === payload.assetId) state.sharedSave = null;
                 break;
-            case EventType.PROPOSAL_SUBMITTED: {
-                const proposal = { ...payload.proposal, status: 'pending' };
-                const index = state.proposals.findIndex((p) => p.proposalId === proposal.proposalId);
-                if (index === -1) state.proposals.push(proposal);
-                else state.proposals[index] = proposal;
-                break;
-            }
-            case EventType.PROPOSAL_WITHDRAWN:
-                this.#setProposalStatus(payload.proposalId, 'withdrawn');
-                break;
-            case EventType.PROPOSAL_ACCEPTED:
-                this.#setProposalStatus(payload.proposalId, 'accepted');
-                break;
-            case EventType.PROPOSAL_REJECTED:
-                this.#setProposalStatus(payload.proposalId, 'rejected', payload.reason);
-                break;
             case EventType.STORY_MESSAGE_PUBLISHED:
                 state.timeline.push({ ...payload.message, seq: event.seq });
+                // AI 回复落地 = 回合结束，清空全员就绪状态。
+                if (payload.message?.role === 'assistant') state.ready = {};
                 break;
             case EventType.SIDECHAT_MESSAGE_POSTED:
                 state.sidechat.push({ ...payload.message });
+                break;
+            case EventType.ROUND_READY_CHANGED:
+                if (payload.state === 'clear') delete state.ready[payload.clientId];
+                else state.ready[payload.clientId] = payload.state;
                 break;
             case EventType.GENERATION_STARTED:
                 state.generating = true;
@@ -184,13 +176,6 @@ export class RoomStore extends EventTarget {
             default:
                 break; // 未知事件：seq 已推进，安全忽略（前向兼容）
         }
-    }
-
-    #setProposalStatus(proposalId, status, reason) {
-        const proposal = this.#state.proposals.find((p) => p.proposalId === proposalId);
-        if (!proposal) return;
-        proposal.status = status;
-        if (reason !== undefined) proposal.reason = reason;
     }
 
     #notify() {

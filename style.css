@@ -172,35 +172,22 @@
     margin-left: auto;
 }
 
-#stmp-window .stmp-proposal {
-    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.3));
-    border-radius: 6px;
-    padding: 0.35rem 0.5rem;
+#stmp-window .stmp-story-editor {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.4rem;
 }
 
-#stmp-window .stmp-proposal-head {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.85em;
-    opacity: 0.85;
-}
-
-#stmp-window .stmp-proposal-text-view {
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-#stmp-window .stmp-proposal-reason {
+#stmp-window .stmp-round-count {
     font-size: 0.85em;
     opacity: 0.75;
+    margin-left: auto;
 }
 
-#stmp-window .stmp-proposal-actions {
-    display: flex;
-    gap: 0.4rem;
+#stmp-window .stmp-mini.stmp-active {
+    border-color: #3fbf5f;
+    color: #3fbf5f;
+    filter: none;
 }
 
 #stmp-window .stmp-empty {
@@ -208,9 +195,18 @@
     opacity: 0.6;
 }
 
-#stmp-window .stmp-sidechat,
-#stmp-window .stmp-timeline {
+#stmp-window .stmp-sidechat {
     max-height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.9em;
+}
+
+/* 共享故事是直连模式的主视图（P3 换成镜像聊天前的临时形态），给足高度。 */
+#stmp-window .stmp-timeline {
+    max-height: 260px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;

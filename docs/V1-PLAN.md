@@ -19,6 +19,8 @@
 
 以现有 `src/protocol.js` 的命名风格为准，relay 的 `src/core/protocol.ts` 必须与本表逐字一致。任何一侧改动命令名，必须同一次提交更新两边和本表。
 
+> **2026-07-12 改版：删除审核模式。** 面向亲密朋友局，成员经 `story.message.publish` 直接向共享时间线发言（relay 的 seq 是全序仲裁），提案命令族（`proposal.*`）整体移除（实现存档见两仓库 git 历史）。新增 `round.ready` 回合就绪信号。
+
 | 命令 | 发起方 | 说明 |
 |---|---|---|
 | `relay.ping` | 所有人 | 传输层心跳/连通性检测（客户端心跳与冒烟测试使用） |
@@ -32,13 +34,10 @@
 | `room.card.clear` | 房主 | 停止共享并立即删除对应角色卡资产 |
 | `room.chat.update` | 房主 | 发布已上传的联机存档（当前聊天 jsonl，kind=chat 资产），成员自动导入续局 |
 | `room.chat.clear` | 房主 | 停止共享并立即删除对应联机存档资产 |
-| `proposal.submit` | 客人 | 提交行动提案 |
-| `proposal.withdraw` | 客人 | 撤回自己的提案 |
-| `proposal.accept` | 房主 | 接受提案（**新增**） |
-| `proposal.reject` | 房主 | 拒绝提案（**新增**） |
-| `story.message.publish` | 房主 | 向共享时间线发布故事消息 |
-| `sidechat.message.post` | 所有人 | 副聊天发言（**新增**） |
-| `generation.start` / `generation.progress` / `generation.finish` | 房主 | AI 生成状态广播，供客人端显示"生成中" |
+| `story.message.publish` | 所有成员 | 直接向共享时间线发言（`role: 'user'`）；`role: 'assistant'`（AI 回复）仅房主可发 |
+| `sidechat.message.post` | 所有人 | 副聊天发言（不进故事、不进 prompt，**新增**） |
+| `round.ready` | 所有成员 | 回合就绪信号（`state: 'ready' \| 'skip' \| 'clear'`），纯信息性，帮助房主决定何时触发生成 |
+| `generation.start` / `generation.progress` / `generation.finish` | 房主 | AI 生成状态广播，供客人端显示"生成中"（progress 将承载流式文本快照，P2） |
 
 ### 2.1 事件词汇表（中继 → 客户端，M1 起）
 
@@ -55,17 +54,14 @@
 | `room.card.cleared` | `{ assetId }` | 完整角色卡停止共享；对应资产立即不可下载 |
 | `room.chat.updated` | `{ assetId, chatName, messageCount, bytes, expiresAt, sharedAt, saveKey?, contentHash? }` | 联机存档（jsonl）已更新；`saveKey` 标识“房主的这一份聊天”（客机覆盖写同一本地聊天文件），`contentHash` 未变则跳过导入 |
 | `room.chat.cleared` | `{ assetId }` | 联机存档停止共享；对应资产立即不可下载 |
-| `proposal.submitted` | `{ proposal: {proposalId, authorClientId, authorDisplayName, text, submittedAt} }` | 客人提交提案（状态隐含 pending） |
-| `proposal.withdrawn` | `{ proposalId, clientId }` | 作者撤回自己的提案 |
-| `proposal.accepted` | `{ proposalId }` | 房主接受（时间线推进由随后的 `story.message.published` 承载） |
-| `proposal.rejected` | `{ proposalId, reason? }` | 房主拒绝（可附理由，≤500 字符） |
-| `story.message.published` | `{ message: {messageId, authorName, role: 'user'\|'assistant', text, proposalId?, publishedAt} }` | 房主向共享时间线发布消息；`proposalId` 回链来源提案 |
-| `sidechat.message.posted` | `{ message: {messageId, authorClientId, authorDisplayName, text, postedAt} }` | 副聊天发言（文本 ≤2000 字符；故事/提案文本 ≤8000） |
+| `story.message.published` | `{ message: {messageId, authorClientId, authorName, role: 'user'\|'assistant', text, publishedAt} }` | 成员的直连发言或房主发布的 AI 回复；`authorClientId` 标识发言人，`authorName` 为其角色名。assistant 消息落地即回合边界（客户端据此清空就绪状态） |
+| `sidechat.message.posted` | `{ message: {messageId, authorClientId, authorDisplayName, text, postedAt} }` | 副聊天发言（文本 ≤2000 字符；故事文本 ≤8000） |
+| `round.ready.changed` | `{ clientId, state: 'ready'\|'skip'\|'clear' }` | **瞬态**回合就绪信号（无 seq、不入日志）；重连丢失无后果 |
 | `generation.started` / `generation.progressed` / `generation.finished` | `{}` / `{ charCount? }` / `{ ok }` | 瞬态生成状态广播（无 seq） |
 
-错误帧携带机器可读的 `payload.code`（两侧 protocol 的 `ErrorCode`，如 `INVITE_INVALID`、`FORBIDDEN`、`PROPOSAL_NOT_PENDING`），UI 据此映射中文文案；`payload.message` 为英文日志文案，不面向用户展示。
+错误帧携带机器可读的 `payload.code`（两侧 protocol 的 `ErrorCode`，如 `INVITE_INVALID`、`FORBIDDEN`），UI 据此映射中文文案；`payload.message` 为英文日志文案，不面向用户展示。
 
-**重连序列（M2 定稿）**：断线重连后依次发 ① `auth.hello`（携带首次 hello 颁发的 `clientId` + `sessionToken`，应答含 `room: {roomId, role, generating} | null`）→ ② `room.resume`（携带本地 `lastAppliedSeq`，应答含 `members`、`generating`、`lastSeq` 与增量事件数组，逐条喂给 `RoomStore.applyEvent()` 即可追平）。`relay-client.js` 的 `resumeProvider` 钩子须在返回 resume 载荷前自行完成 ①。内容类命令（提案/故事/副聊天）重试时**复用原 `opId`** 即可幂等：中继按房间缓存 opId → ack 结果，重发只回放 ack、不重复产生事件。
+**重连序列（M2 定稿）**：断线重连后依次发 ① `auth.hello`（携带首次 hello 颁发的 `clientId` + `sessionToken`，应答含 `room: {roomId, role, generating} | null`）→ ② `room.resume`（携带本地 `lastAppliedSeq`，应答含 `members`、`generating`、`lastSeq` 与增量事件数组，逐条喂给 `RoomStore.applyEvent()` 即可追平）。`relay-client.js` 的 `resumeProvider` 钩子须在返回 resume 载荷前自行完成 ①。内容类命令（故事/副聊天）重试时**复用原 `opId`** 即可幂等：中继按房间缓存 opId → ack 结果，重发只回放 ack、不重复产生事件。
 
 ## 3. 阶段任务
 
@@ -100,16 +96,20 @@
 - [x] `style.css`：全部选择器带 `stmp-` 前缀，不污染酒馆全局样式；配色走 SmartTheme CSS 变量，深浅主题下均可读。
 - [ ] **验收**：四项技术验证全过且有记录（✅ 见 `docs/MIRROR-FEASIBILITY.md`）；客人全流程（入房 → 提案 → 简易时间线见到接受与故事推进 → 副聊天）全程不触碰酒馆原生聊天；两个客人同时在线互相可见对方动作。
   - 2026-07-11：数据层全流程已由 `scripts/smoke-client.mjs` 脚本化验收——双客户端投影收敛（成员/提案/时间线/副聊天）、seq 缺口触发 desync 且 resume 无重复、断线期间推进经 hello+resume 追平、关房传播到客人投影。**剩余：浮窗 UI 装入 SillyTavern 的真机双人手测**，通过后本项勾除。
+  - 2026-07-12 注：审核模式（提案编辑器/审核队列/提案投影）已随直连化改版整体移除（见 P2 改版说明与 §2）；上述验收记录保留原文，`smoke-client.mjs` 已改为直连流并重新通过。
 
-### P2 — 房主桥接（对应总计划 M4，最脆弱层）
+### P2 — 房主桥接（对应总计划 M4，最脆弱层；2026-07-12 改版：直连聊天室模式）
+
+> **改版决定（2026-07-12）：删除审核模式。** 游玩循环定稿：AI 回复落地 → 自由输入期（成员经 `story.message.publish` 直接发言，全员实时可见，relay seq 全序仲裁）→ 成员发"我说完了/跳过"就绪信号（`round.ready`，瞬态）→ 房主收束触发生成。"全员就绪自动生成"只是房主端本地自动化（替房主按按钮），协议无分支。角色区分在消息层：`name`/`force_avatar` 按发言人角色名署名，AI 通过 prompt 内的名字前缀区分玩家（instruct include names / CC names_behavior）；`{{user}}` 宏绑定房主 persona 的局限由卡片措辞与作者注释缓解。
 
 - [ ] `host-bridge.js` 铁律：只通过 `SillyTavern.getContext()` 访问酒馆能力，禁止 import 酒馆内部模块路径。
 - [ ] `getBinding()` 扩展为显式"绑定当前聊天"操作：房主选定后锁定 chatId，切换聊天时给出警告而不是静默跟随。
-- [ ] `publishAcceptedAction(proposal)`：将已接受提案作为用户侧消息写入绑定聊天，成功后由房主端发 `story.message.publish` 镜像到时间线。
-- [ ] `generateReply()`：触发酒馆生成，桥接 `generation.start/progress/finish` 广播；完成后把 AI 回复发布到时间线。
-- [ ] 一致性：提供显式"重新同步时间线"按钮（房主编辑/删除/swipe 后手动触发，V1 不做自动监听）。
+- [ ] 成员消息写入：房主端收到非自己发出的 `story.message.published`（user 角色）后写入绑定聊天，`name` 用发言人角色名、`force_avatar` 对齐其头像；写入失败在面板报错并可重试。
+- [ ] 生成触发：房主"让 AI 回复"按钮 + 房主输入框"发送并生成"合并按钮（生成中置灰）；桥接 `generation.start/finish` 广播；`STREAM_TOKEN_RECEIVED` 节流（约 300ms）经 `generation.progress` 转发流式文本快照（逼近 WS 64KB 帧上限时降级）；完成后把 AI 回复以 assistant 角色发布到时间线。
+- [ ] 就绪计数：面板"本回合已就绪 n/m"（信号与投影已实现）；可选房主本地开关"全员就绪自动生成"（含短缓冲）。
+- [ ] 一致性：显式"重新同步" = 一键同步（角色卡 + 联机存档快照，已实现）；房主编辑/删除/swipe 后手动触发，V1 不做自动监听。
 - [ ] `index.js` 版本护栏：启动时探测所需 `getContext()` API 是否齐全，缺失则在面板显示明确错误并禁用功能，而非静默失败；维护 `manifest.json` 的 `minimum_client_version`。
-- [ ] **验收**：完整一局跑通（提案 → 接受 → 写入本地聊天 → AI 生成 → 全员看到回复与生成状态）；解绑聊天后所有写入操作被拒绝。
+- [ ] **验收**：完整一局跑通（多成员自由发言 → 写入房主聊天 → 房主收束生成 → 流式输出全员可见 → 权威回复落时间线并清空就绪状态）；解绑聊天后所有写入操作被拒绝。
 
 ### P3 — 镜像聊天模式（客人故事主界面，V1 主路线；2026-07-11 改版）
 

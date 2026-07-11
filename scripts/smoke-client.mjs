@@ -164,20 +164,23 @@ if (guest.store.snapshot.members.length !== 2) fail('guest store does not see bo
 await until(() => host.store.snapshot.members.length === 2, 'host sees guest in member projection');
 pass('guest joins via invite; both member projections converge');
 
-await guest.client.request(createCommand(CommandType.PROPOSAL_SUBMIT, { text: '我推门而入。' }));
-await until(() => host.store.snapshot.proposals.some((p) => p.status === 'pending'), 'host store shows pending proposal');
-pass('proposal reaches host projection as pending');
+// 直连模式（2026-07-12）：客机直接向共享时间线发言，两侧投影一致。
+await guest.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '我推门而入。', authorName: '小红', role: 'user' }));
+await until(() => host.store.snapshot.timeline.length === 1, 'host timeline shows guest message');
+const guestMessage = host.store.snapshot.timeline[0];
+if (guestMessage.authorName !== '小红' || guestMessage.role !== 'user' || !guestMessage.authorClientId) fail('guest story message lacks author identity');
+pass('guest publishes directly; host projection converges with identity');
 
-const pendingId = host.store.snapshot.proposals[0].proposalId;
-await host.client.request(createCommand(CommandType.PROPOSAL_ACCEPT, { proposalId: pendingId }));
-await until(() => guest.store.snapshot.proposals[0]?.status === 'accepted', 'guest store shows accepted');
-pass('acceptance reflected in author projection');
+// 就绪信号：瞬态事件驱动 ready 投影；AI 回复落地即清空（回合边界）。
+await guest.client.request(createCommand(CommandType.ROUND_READY, { state: 'ready' }));
+await until(() => host.store.snapshot.ready[guest.creds.clientId] === 'ready', 'host sees guest ready');
+pass('round-ready signal reaches host projection');
 
-await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
-    text: '我推门而入。', authorName: '客人', role: 'user', proposalId: pendingId,
-}));
-await until(() => guest.store.snapshot.timeline.length === 1, 'guest timeline has the story message');
-pass('story message lands in timeline projection');
+await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '门开了，风灌了进来。', authorName: '角色', role: 'assistant' }));
+await until(() => guest.store.snapshot.timeline.length === 2, 'guest timeline has assistant reply');
+await until(() => Object.keys(host.store.snapshot.ready).length === 0, 'host ready map cleared');
+await until(() => Object.keys(guest.store.snapshot.ready).length === 0, 'guest ready map cleared');
+pass('assistant reply lands and clears the round-ready map');
 
 await guest.client.request(createCommand(CommandType.SIDECHAT_MESSAGE_POST, { text: '这里好玩！' }));
 await until(() => host.store.snapshot.sidechat.length === 1, 'host sidechat projection updated');
@@ -192,9 +195,9 @@ const gapApplied = guest.store.applyEvent({
     payload: { message: { messageId: 'synthetic', authorName: 'x', role: 'user', text: 'gap', publishedAt: 0 } },
 });
 if (gapApplied !== false || !desynced) fail('seq gap did not trigger desync');
-if (guest.store.snapshot.timeline.length !== 1) fail('gapped event was applied');
+if (guest.store.snapshot.timeline.length !== 2) fail('gapped event was applied');
 await guest.resume();
-if (guest.store.snapshot.timeline.length !== 1) fail('resume after desync duplicated timeline');
+if (guest.store.snapshot.timeline.length !== 2) fail('resume after desync duplicated timeline');
 pass('seq gap triggers desync; resume recovers without duplicates');
 
 // 断线期间的推进经重连 + resume 追平，无缺失无重复
@@ -205,7 +208,7 @@ await guest.connect();
 const rehello = await guest.hello();
 if (rehello.payload.room?.roomId !== roomId) fail('hello did not report resumable room');
 await guest.resume();
-await until(() => guest.store.snapshot.timeline.length === 3, 'guest timeline caught up to 3');
+await until(() => guest.store.snapshot.timeline.length === 4, 'guest timeline caught up to 4');
 const seqs = guest.store.snapshot.timeline.map((m) => m.seq);
 if (new Set(seqs).size !== seqs.length) fail('timeline contains duplicate seq');
 pass('offline progress recovered via hello+resume (no gap, no dup)');

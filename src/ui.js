@@ -31,7 +31,6 @@ const ERROR_TEXT = {
     INVITE_INVALID: '邀请码无效、已过期或已用尽。',
     FORBIDDEN: '没有权限执行该操作。',
     TARGET_NOT_FOUND: '目标不存在。',
-    PROPOSAL_NOT_PENDING: '该提案已不在待审状态。',
     RATE_LIMITED: '操作过于频繁，请稍候再试。',
     UNAUTHORIZED: '会话凭据无效，请重新连接。',
     ASSET_NOT_FOUND: '共享的角色卡不存在或已过期。',
@@ -43,13 +42,6 @@ const ERROR_TEXT = {
 function errorText(error) {
     return ERROR_TEXT[error?.code] ?? error?.message ?? '未知错误。';
 }
-
-const PROPOSAL_STATUS_TEXT = {
-    pending: '⏳ 待审核',
-    accepted: '✅ 已接受',
-    rejected: '❌ 已拒绝',
-    withdrawn: '↩️ 已撤回',
-};
 
 export function mountMultiplayerPanel({ settings, store, relay, cardSharing, saveSharing, saveSettings }) {
     if ($(`#${PANEL_ID}`).length) return;
@@ -425,6 +417,10 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                     <input id="st-multiplayer-display-name" class="text_pole" type="text" maxlength="32">
                 </div>
                 <div class="stmp-row">
+                    <label for="st-multiplayer-persona-name">角色名</label>
+                    <input id="st-multiplayer-persona-name" class="text_pole" type="text" maxlength="32" placeholder="故事内署名，留空用昵称">
+                </div>
+                <div class="stmp-row">
                     <label class="checkbox_label" for="st-multiplayer-reconnect">
                         <input id="st-multiplayer-reconnect" type="checkbox">
                         <span>断线自动重连</span>
@@ -440,6 +436,7 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
 
     panel.find('#st-multiplayer-relay-url').val(settings.relayUrl);
     panel.find('#st-multiplayer-display-name').val(settings.displayName);
+    panel.find('#st-multiplayer-persona-name').val(settings.personaName ?? '');
     panel.find('#st-multiplayer-reconnect').prop('checked', settings.reconnect);
 
     panel.find('#st-multiplayer-relay-url').on('input', function () {
@@ -448,6 +445,10 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
     });
     panel.find('#st-multiplayer-display-name').on('input', function () {
         settings.displayName = String($(this).val()).trim();
+        saveSettings();
+    });
+    panel.find('#st-multiplayer-persona-name').on('input', function () {
+        settings.personaName = String($(this).val()).trim();
         saveSettings();
     });
     panel.find('#st-multiplayer-reconnect').on('change', function () {
@@ -533,26 +534,30 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                         <div class="stmp-section-title">成员</div>
                         <div class="stmp-members"></div>
                     </div>
+                    <details class="stmp-section stmp-timeline-details" open>
+                        <summary>共享故事</summary>
+                        <div class="stmp-timeline"></div>
+                    </details>
                     <div class="stmp-section">
-                        <div class="stmp-section-title">提案</div>
-                        <div class="stmp-proposals"></div>
-                        <div class="stmp-proposal-editor">
-                            <textarea class="stmp-proposal-text text_pole" rows="2" placeholder="写下你的行动提案……"></textarea>
-                            <button class="stmp-proposal-submit menu_button">提交提案</button>
+                        <div class="stmp-section-title">故事发言</div>
+                        <div class="stmp-story-editor">
+                            <textarea class="stmp-story-text text_pole" rows="2" placeholder="以你的角色行动/发言（全员实时可见，Ctrl+Enter 发送）……"></textarea>
+                            <button class="stmp-story-send menu_button">发送</button>
+                        </div>
+                        <div class="stmp-row stmp-round-row">
+                            <button class="stmp-round-ready menu_button stmp-mini">我说完了</button>
+                            <button class="stmp-round-skip menu_button stmp-mini">跳过本回合</button>
+                            <span class="stmp-round-count"></span>
                         </div>
                     </div>
                     <div class="stmp-section">
-                        <div class="stmp-section-title">副聊天</div>
+                        <div class="stmp-section-title">副聊天（不进故事）</div>
                         <div class="stmp-sidechat"></div>
                         <div class="stmp-row">
                             <input class="stmp-sidechat-text text_pole" type="text" maxlength="2000" placeholder="聊两句（不进故事）……">
                             <button class="stmp-sidechat-send menu_button">发送</button>
                         </div>
                     </div>
-                    <details class="stmp-section stmp-timeline-details">
-                        <summary>时间线（调试视图）</summary>
-                        <div class="stmp-timeline"></div>
-                    </details>
                     <div class="stmp-row stmp-room-actions">
                         <button class="stmp-leave menu_button">离开房间</button>
                     </div>
@@ -674,11 +679,28 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         toastr.success('邀请码已复制。', '联机酒馆');
     }));
 
-    windowEl.find('.stmp-proposal-submit').on('click', guarded(async () => {
-        const text = String(windowEl.find('.stmp-proposal-text').val()).trim();
-        if (!text) throw new Error('提案内容不能为空。');
-        await relay.request(createCommand(CommandType.PROPOSAL_SUBMIT, { text }));
-        windowEl.find('.stmp-proposal-text').val('');
+    windowEl.find('.stmp-story-send').on('click', guarded(async () => {
+        const text = String(windowEl.find('.stmp-story-text').val()).trim();
+        if (!text) throw new Error('发言内容不能为空。');
+        await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
+            text,
+            authorName: settings.personaName || settings.displayName || '玩家',
+            role: 'user',
+        }));
+        windowEl.find('.stmp-story-text').val('');
+    }));
+    windowEl.find('.stmp-story-text').on('keydown', (event) => {
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) windowEl.find('.stmp-story-send').trigger('click');
+    });
+
+    // 就绪/跳过是给房主看的信息信号；再点一次取消。
+    windowEl.find('.stmp-round-ready').on('click', guarded(async () => {
+        const mine = store.snapshot.ready[store.selfClientId];
+        await relay.request(createCommand(CommandType.ROUND_READY, { state: mine === 'ready' ? 'clear' : 'ready' }));
+    }));
+    windowEl.find('.stmp-round-skip').on('click', guarded(async () => {
+        const mine = store.snapshot.ready[store.selfClientId];
+        await relay.request(createCommand(CommandType.ROUND_READY, { state: mine === 'skip' ? 'clear' : 'skip' }));
     }));
 
     windowEl.find('.stmp-sidechat-send').on('click', guarded(async () => {
@@ -757,7 +779,7 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         await importSharedSave(store.snapshot.sharedSave, true);
     }));
 
-    // 提案/成员列表内的动态按钮走事件委托。
+    // 成员列表内的动态按钮走事件委托。
     windowEl.on('click', '.stmp-kick', guarded(async function () {
         const command = createKickCommand({
             targetClientId: this.getAttribute('data-client-id'),
@@ -766,19 +788,6 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         const name = this.getAttribute('data-name') || '该成员';
         if (!window.confirm(`确定把 ${name} 移出房间吗？`)) return;
         await relay.request(command);
-    }));
-    windowEl.on('click', '.stmp-accept', guarded(async function () {
-        await relay.request(createCommand(CommandType.PROPOSAL_ACCEPT, { proposalId: $(this).data('proposal-id') }));
-    }));
-    windowEl.on('click', '.stmp-reject', guarded(async function () {
-        const reason = window.prompt('拒绝理由（可留空）：') ?? '';
-        await relay.request(createCommand(CommandType.PROPOSAL_REJECT, {
-            proposalId: $(this).data('proposal-id'),
-            ...(reason.trim() ? { reason: reason.trim() } : {}),
-        }));
-    }));
-    windowEl.on('click', '.stmp-withdraw', guarded(async function () {
-        await relay.request(createCommand(CommandType.PROPOSAL_WITHDRAW, { proposalId: $(this).data('proposal-id') }));
     }));
 
     // ---------- 渲染 ----------
@@ -871,31 +880,17 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
             members.append(row);
         }
 
-        const proposals = windowEl.find('.stmp-proposals').empty();
-        const visibleProposals = snapshot.proposals.filter((p) => isHost
-            ? p.status === 'pending'
-            : (p.authorClientId === snapshot.room.selfClientId || p.status === 'pending'));
-        if (!visibleProposals.length) proposals.append($('<div class="stmp-empty">').text(isHost ? '暂无待审提案。' : '暂无提案。'));
-        for (const proposal of visibleProposals.slice(-20)) {
-            const row = $('<div class="stmp-proposal">');
-            const head = $('<div class="stmp-proposal-head">').appendTo(row);
-            $('<span class="stmp-proposal-author">').text(proposal.authorDisplayName).appendTo(head);
-            $('<span class="stmp-proposal-status">').text(PROPOSAL_STATUS_TEXT[proposal.status] ?? proposal.status).appendTo(head);
-            $('<div class="stmp-proposal-text-view">').text(proposal.text).appendTo(row);
-            if (proposal.status === 'rejected' && proposal.reason) {
-                $('<div class="stmp-proposal-reason">').text(`理由：${proposal.reason}`).appendTo(row);
-            }
-            const actions = $('<div class="stmp-proposal-actions">').appendTo(row);
-            if (isHost && proposal.status === 'pending') {
-                $('<button class="stmp-accept menu_button stmp-mini">接受</button>').attr('data-proposal-id', proposal.proposalId).appendTo(actions);
-                $('<button class="stmp-reject menu_button stmp-mini">拒绝</button>').attr('data-proposal-id', proposal.proposalId).appendTo(actions);
-            }
-            if (!isHost && proposal.status === 'pending' && proposal.authorClientId === snapshot.room.selfClientId) {
-                $('<button class="stmp-withdraw menu_button stmp-mini">撤回</button>').attr('data-proposal-id', proposal.proposalId).appendTo(actions);
-            }
-            proposals.append(row);
-        }
-        windowEl.find('.stmp-proposal-editor').toggle(!isHost);
+        // 回合就绪状态：计数给房主定夺，按钮高亮自己的状态。
+        const readyMap = snapshot.ready ?? {};
+        const acted = snapshot.members.filter((member) => readyMap[member.clientId]).length;
+        windowEl.find('.stmp-round-count').text(`本回合已就绪 ${acted}/${snapshot.members.length}`);
+        const myRoundState = readyMap[snapshot.room.selfClientId];
+        windowEl.find('.stmp-round-ready')
+            .toggleClass('stmp-active', myRoundState === 'ready')
+            .text(myRoundState === 'ready' ? '✓ 我说完了' : '我说完了');
+        windowEl.find('.stmp-round-skip')
+            .toggleClass('stmp-active', myRoundState === 'skip')
+            .text(myRoundState === 'skip' ? '✓ 跳过本回合' : '跳过本回合');
 
         const sidechat = windowEl.find('.stmp-sidechat').empty();
         for (const message of snapshot.sidechat.slice(-50)) {

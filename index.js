@@ -9,6 +9,8 @@ const EXTENSION_KEY = 'sillytavernMultiplayer';
 const DEFAULT_SETTINGS = Object.freeze({
     relayUrl: '',
     displayName: '',
+    /** 故事内署名（角色名）；留空时用 displayName。 */
+    personaName: '',
     reconnect: true,
     /** auth.hello 颁发的恢复凭据 { clientId, sessionToken }；仅用于断线重连恢复席位。 */
     credentials: null,
