@@ -210,6 +210,35 @@ const seqs = guest.store.snapshot.timeline.map((m) => m.seq);
 if (new Set(seqs).size !== seqs.length) fail('timeline contains duplicate seq');
 pass('offline progress recovered via hello+resume (no gap, no dup)');
 
+// 完整卡共享：房主上传资产并发布，客人投影收到；停止共享后投影清空。
+const assetBase = new URL(wsUrl);
+assetBase.protocol = assetBase.protocol === 'wss:' ? 'https:' : 'http:';
+assetBase.pathname = '';
+assetBase.search = '';
+assetBase.hash = '';
+const cardBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Uint8Array(64)]);
+const upload = await fetch(`${assetBase.origin}/rooms/${roomId}/assets?kind=card`, {
+    method: 'POST',
+    headers: {
+        'content-type': 'image/png',
+        'x-relay-client-id': host.creds.clientId,
+        'x-relay-session-token': host.creds.sessionToken,
+    },
+    body: cardBytes,
+});
+if (!upload.ok) fail(`card upload failed: HTTP ${upload.status}`);
+const sharedAssetId = (await upload.json()).assetId;
+await host.client.request(createCommand(CommandType.ROOM_CARD_UPDATE, {
+    assetId: sharedAssetId,
+    characterName: '测试角色',
+}));
+await until(() => guest.store.snapshot.sharedCard?.assetId === sharedAssetId, 'guest sees shared card projection');
+pass('shared full card reaches guest projection');
+
+await host.client.request(createCommand(CommandType.ROOM_CARD_CLEAR, { assetId: sharedAssetId }));
+await until(() => guest.store.snapshot.sharedCard === null, 'guest sees shared card revoked');
+pass('revoked full card clears guest projection');
+
 // 房主离房 → 客人端投影收到关房
 await host.client.request(createCommand(CommandType.ROOM_LEAVE));
 await until(() => guest.store.snapshot.closedReason === 'host_left', 'guest store sees room closed');

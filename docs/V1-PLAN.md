@@ -28,6 +28,8 @@
 | `room.resume` | 所有人 | 断线重连：携带 `lastAppliedSeq`，服务端回快照+增量 |
 | `room.leave` | 所有人 | 离房（**新增**） |
 | `room.kick` | 房主 | 踢人（**新增**） |
+| `room.card.update` | 房主 | 发布已上传的完整角色卡资产，房间成员自动同步 |
+| `room.card.clear` | 房主 | 停止共享并立即删除对应角色卡资产 |
 | `proposal.submit` | 客人 | 提交行动提案 |
 | `proposal.withdraw` | 客人 | 撤回自己的提案 |
 | `proposal.accept` | 房主 | 接受提案（**新增**） |
@@ -47,6 +49,8 @@
 | `room.member.online` | `{ clientId }` | 成员断线重连（`auth.hello` 携带恢复凭据） |
 | `room.member.offline` | `{ clientId }` | 成员掉线（连接断开但保留席位） |
 | `room.closed` | `{ reason: 'host_left' \| 'expired' }` | 房间关闭（房主离房即关房，V1 决定） |
+| `room.card.updated` | `{ assetId, characterName, bytes, expiresAt, sharedAt }` | 完整角色卡已更新；持久事件，断线后可由 resume 重放 |
+| `room.card.cleared` | `{ assetId }` | 完整角色卡停止共享；对应资产立即不可下载 |
 | `proposal.submitted` | `{ proposal: {proposalId, authorClientId, authorDisplayName, text, submittedAt} }` | 客人提交提案（状态隐含 pending） |
 | `proposal.withdrawn` | `{ proposalId, clientId }` | 作者撤回自己的提案 |
 | `proposal.accepted` | `{ proposalId }` | 房主接受（时间线推进由随后的 `story.message.published` 承载） |
@@ -107,15 +111,15 @@
 
 > 目标：客人的故事主界面复用原生聊天渲染（头像气泡、主题、TTS/翻译等扩展全部生效），同时保留房主权威模型不变。前置条件：P1、P2 完成，中继 M2.5 资产通道可用，四项本地技术验证已在 P1 通过。
 
-- [ ] **补验第 5 项（本阶段开工门槛）**：资产通道端到端（房主导出 → 中继 → 客人导入）。不过则镜像降级 V2，客人显示回退 P1 简易时间线并升级为气泡式渲染（见 P1 回退方案）。
+- [ ] **补验第 5 项（本阶段开工门槛）**：资产通道端到端（房主导出 → 中继 → 客人导入）。脚本闭环已于 2026-07-11 通过：Relay 覆盖上传/权限/广播/resume/撤销/CORS，插件覆盖 SillyTavern 导出表单、上传、下载、固定房间卡名覆盖导入和投影；剩余 SillyTavern 双端真机导入/切卡手测，通过后勾除。
 - [ ] 镜像聊天：插件在客人端创建**专用**聊天（`chat_metadata` 打 multiplayer/roomId 标记），时间线事件写成署名消息（force_avatar 对齐各玩家头像），AI 回复写成角色消息；`seq` 错位时重写镜像尾部对齐权威顺序。
 - [ ] 输入框接管：客人在镜像聊天中发送 → 截获转为 `proposal.submit` + "⏳ 待审核"占位 → 接受后替换为权威版本；拒绝则移除占位并提示。
 - [ ] 只读保护：编辑/删除/swipe 一律回滚并提示"联机镜像为只读"；镜像内禁用生成触发。
 - [ ] **卡片同步两档**：
   - 档位一（默认开）：房主同步角色名字 + 头像 → 客人端自动创建"皮肤卡"（定义为空），镜像挂其下——观感与本地卡一致，人设定义不离开房主机器；
-  - 档位二（房主**每房间显式开启**，默认关）：完整卡 PNG 经资产通道传输，客人端导入为真卡；开启时确认框提示卡片分享责任；外部挂载的世界书不随卡走，提示"续玩效果可能与联机时不同"。
+  - [x] 档位二（房主**每房间显式开启**，默认关）：完整卡 PNG 经资产通道传输，客人端以 `stmp_<roomId>` 固定名字覆盖导入并选中；开启时确认框提示卡片可被成员保存、外部挂载世界书不随卡走。支持更新与停止共享，停止后 Relay 立即删除资产。（真机 UI 验收仍并入上方第 5 项）
 - [ ] 散场留存：房间结束后提供"解除镜像锁定"与"**复制为可玩副本**"（推荐后者——镜像本体保留以备房间重开续联，副本随便编辑/续玩）；档位二下副本 + 导入卡即可单机续玩。
-- [ ] 协议增量：卡片分享所需的新命令/事件（如 `room.card.update`）在技术验证通过后补入第 2 节词汇表，并同一提交同步 relay `core/protocol.ts`。
+- [x] 协议增量：`room.card.update/clear` 与 `room.card.updated/cleared` 已同步插件与 Relay，并纳入 resume 日志和 smoke。
 - [ ] **验收**：客人在原生聊天界面完成一局全流程（发送 → 待审 → 接受 → AI 回复出现），观感与本地卡一致；档位二散场后单机续玩成功；客人自有聊天与角色数据全程零改动，删除镜像与皮肤卡后不留任何残余。
 
 ## 4. 插件侧约束（评审逐条检查）

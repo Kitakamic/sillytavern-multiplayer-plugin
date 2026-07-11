@@ -1,4 +1,5 @@
 import { createHostBridge } from './src/host-bridge.js';
+import { CharacterCardSharing } from './src/card-sharing.js';
 import { RelayClient } from './src/relay-client.js';
 import { RoomStore } from './src/room-store.js';
 import { mountMultiplayerPanel } from './src/ui.js';
@@ -32,12 +33,14 @@ function initialize() {
     const relay = new RelayClient();
     relay.reconnectEnabled = settings.reconnect;
     const hostBridge = createHostBridge(context);
+    const cardSharing = new CharacterCardSharing(() => globalThis.SillyTavern?.getContext?.());
 
     mountMultiplayerPanel({
         settings,
         store,
         relay,
         hostBridge,
+        cardSharing,
         saveSettings: () => context.saveSettingsDebounced(),
     });
 
