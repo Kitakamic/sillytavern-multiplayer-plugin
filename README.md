@@ -31,6 +31,10 @@ manifest.json         SillyTavern extension manifest
 src/relay-client.js   WSS connection and reconnect boundary
 src/room-store.js     Local read-only room projection
 src/host-bridge.js    Host-only bridge to the native ST chat and generation APIs
+src/card-sharing.js   Full character-card share/import over the relay asset channel
+src/save-sharing.js   Co-op chat save (jsonl) share/import over the relay asset channel
+src/relay-http.js     Shared asset-channel HTTP helpers (auth headers, hashing)
+src/kick-command.js   room.kick command construction and validation
 src/ui.js             Extension UI shell
 src/protocol.js       Shared browser-side protocol constants
 ```
@@ -39,5 +43,5 @@ The matching relay service lives in the sibling `sillytavern-multiplayer-relay` 
 
 ## Status
 
-Phases P0 and P1 are code-complete. P0 delivered the protocol vocabulary, invite-code utilities, and `src/relay-client.js` (request/ack correlation, exponential-backoff reconnection, heartbeat dead-connection detection). P1 delivered the mirror-mode feasibility validation (`docs/MIRROR-FEASIBILITY.md`, all four local checks feasible on SillyTavern 1.16.0), the full `src/room-store.js` event reducer (members / proposals / timeline / side chat projections, seq-gap detection with `room.resume` recovery), and the floating control-center window in `src/ui.js` (join/create room, member list with presence, proposal editor and host review queue, side chat, collapsed debug timeline). The data layer is script-verified end-to-end by `scripts/smoke-client.mjs` against a live relay; the remaining P1 acceptance item is a manual two-player test inside SillyTavern. Next: host chat bridging (P2), then the mirror chat itself (P3), per `docs/V1-PLAN.md`.
+Phases P0 and P1 are code-complete. P0 delivered the protocol vocabulary, invite-code utilities, and `src/relay-client.js` (request/ack correlation, exponential-backoff reconnection, heartbeat dead-connection detection). P1 delivered the mirror-mode feasibility validation (`docs/MIRROR-FEASIBILITY.md`, all four local checks feasible on SillyTavern 1.16.0), the full `src/room-store.js` event reducer (members / proposals / timeline / side chat projections, seq-gap detection with `room.resume` recovery), and the floating control-center window in `src/ui.js` (opened via a draggable floating ball; join/create room, member list with presence, proposal editor and host review queue, side chat, collapsed debug timeline). Room sharing now covers both the full character card and the co-op chat save: the host shares the current chat's jsonl (`src/save-sharing.js`, published as a `kind=chat` asset via `room.chat.update`), guests auto-import it under the mirrored character so a half-played session can resume another day. Both shares carry `cardKey`/`saveKey` + `contentHash` dedup metadata — unchanged content skips upload/import, and the same card or save reuses the same local file across rooms instead of piling up copies. The data layer is script-verified end-to-end by `scripts/smoke-client.mjs` against a live relay; the remaining P1 acceptance item is a manual two-player test inside SillyTavern. Next: host chat bridging (P2), then the mirror chat itself (P3), per `docs/V1-PLAN.md`.
 

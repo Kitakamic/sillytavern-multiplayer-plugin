@@ -1,5 +1,6 @@
 import { createHostBridge } from './src/host-bridge.js';
 import { CharacterCardSharing } from './src/card-sharing.js';
+import { ChatSaveSharing } from './src/save-sharing.js';
 import { RelayClient } from './src/relay-client.js';
 import { RoomStore } from './src/room-store.js';
 import { mountMultiplayerPanel } from './src/ui.js';
@@ -13,6 +14,10 @@ const DEFAULT_SETTINGS = Object.freeze({
     credentials: null,
     /** 悬浮球位置 { left, top }（px）；null 表示使用默认位置。 */
     ballPos: null,
+    /** 客机已导入的共享卡：cardKey → { contentHash, fileName }，跨房间复用同一本地角色文件。 */
+    importedCards: null,
+    /** 客机已导入的联机存档：saveKey → { contentHash, fileName }，覆盖写同一本地聊天文件。 */
+    importedSaves: null,
 });
 
 function getExtensionSettings(context) {
@@ -33,7 +38,9 @@ function initialize() {
     const relay = new RelayClient();
     relay.reconnectEnabled = settings.reconnect;
     const hostBridge = createHostBridge(context);
-    const cardSharing = new CharacterCardSharing(() => globalThis.SillyTavern?.getContext?.());
+    const contextProvider = () => globalThis.SillyTavern?.getContext?.();
+    const cardSharing = new CharacterCardSharing(contextProvider);
+    const saveSharing = new ChatSaveSharing(contextProvider);
 
     mountMultiplayerPanel({
         settings,
@@ -41,6 +48,7 @@ function initialize() {
         relay,
         hostBridge,
         cardSharing,
+        saveSharing,
         saveSettings: () => context.saveSettingsDebounced(),
     });
 

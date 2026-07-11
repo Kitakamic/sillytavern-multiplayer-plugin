@@ -28,8 +28,10 @@
 | `room.resume` | 所有人 | 断线重连：携带 `lastAppliedSeq`，服务端回快照+增量 |
 | `room.leave` | 所有人 | 离房（**新增**） |
 | `room.kick` | 房主 | 踢人（**新增**） |
-| `room.card.update` | 房主 | 发布已上传的完整角色卡资产，房间成员自动同步 |
+| `room.card.update` | 房主 | 发布已上传的完整角色卡资产，房间成员自动同步；可携带 `cardKey`/`contentHash` 去重元数据 |
 | `room.card.clear` | 房主 | 停止共享并立即删除对应角色卡资产 |
+| `room.chat.update` | 房主 | 发布已上传的联机存档（当前聊天 jsonl，kind=chat 资产），成员自动导入续局 |
+| `room.chat.clear` | 房主 | 停止共享并立即删除对应联机存档资产 |
 | `proposal.submit` | 客人 | 提交行动提案 |
 | `proposal.withdraw` | 客人 | 撤回自己的提案 |
 | `proposal.accept` | 房主 | 接受提案（**新增**） |
@@ -49,8 +51,10 @@
 | `room.member.online` | `{ clientId }` | 成员断线重连（`auth.hello` 携带恢复凭据） |
 | `room.member.offline` | `{ clientId }` | 成员掉线（连接断开但保留席位） |
 | `room.closed` | `{ reason: 'host_left' \| 'expired' }` | 房间关闭（房主离房即关房，V1 决定） |
-| `room.card.updated` | `{ assetId, characterName, bytes, expiresAt, sharedAt }` | 完整角色卡已更新；持久事件，断线后可由 resume 重放 |
+| `room.card.updated` | `{ assetId, characterName, bytes, expiresAt, sharedAt, cardKey?, contentHash? }` | 完整角色卡已更新；持久事件，断线后可由 resume 重放。`cardKey` 标识“房主的这一张卡”（客机据此覆盖同一本地副本），`contentHash` 为 PNG 的 SHA-256（内容未变则客机跳过导入） |
 | `room.card.cleared` | `{ assetId }` | 完整角色卡停止共享；对应资产立即不可下载 |
+| `room.chat.updated` | `{ assetId, chatName, messageCount, bytes, expiresAt, sharedAt, saveKey?, contentHash? }` | 联机存档（jsonl）已更新；`saveKey` 标识“房主的这一份聊天”（客机覆盖写同一本地聊天文件），`contentHash` 未变则跳过导入 |
+| `room.chat.cleared` | `{ assetId }` | 联机存档停止共享；对应资产立即不可下载 |
 | `proposal.submitted` | `{ proposal: {proposalId, authorClientId, authorDisplayName, text, submittedAt} }` | 客人提交提案（状态隐含 pending） |
 | `proposal.withdrawn` | `{ proposalId, clientId }` | 作者撤回自己的提案 |
 | `proposal.accepted` | `{ proposalId }` | 房主接受（时间线推进由随后的 `story.message.published` 承载） |

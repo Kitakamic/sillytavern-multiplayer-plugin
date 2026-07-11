@@ -7,7 +7,8 @@ function initialState() {
         proposals: [], // [{ proposalId, authorClientId, authorDisplayName, text, submittedAt, status, reason? }]
         timeline: [], // [{ messageId, authorName, role, text, proposalId?, publishedAt, seq }]
         sidechat: [], // [{ messageId, authorClientId, authorDisplayName, text, postedAt }]
-        sharedCard: null, // { assetId, characterName, bytes, expiresAt, sharedAt }
+        sharedCard: null, // { assetId, characterName, bytes, expiresAt, sharedAt, cardKey?, contentHash? }
+        sharedSave: null, // { assetId, chatName, messageCount, bytes, expiresAt, sharedAt, saveKey?, contentHash? }
         generating: false,
         /** 本端离房原因：'left' | 'kicked' | 'host_left' | 'expired'，用于 UI 提示。 */
         closedReason: null,
@@ -128,10 +129,27 @@ export class RoomStore extends EventTarget {
                     bytes: payload.bytes,
                     expiresAt: payload.expiresAt,
                     sharedAt: payload.sharedAt,
+                    cardKey: payload.cardKey ?? null,
+                    contentHash: payload.contentHash ?? null,
                 };
                 break;
             case EventType.ROOM_CARD_CLEARED:
                 if (!state.sharedCard || state.sharedCard.assetId === payload.assetId) state.sharedCard = null;
+                break;
+            case EventType.ROOM_CHAT_UPDATED:
+                state.sharedSave = {
+                    assetId: payload.assetId,
+                    chatName: payload.chatName,
+                    messageCount: payload.messageCount,
+                    bytes: payload.bytes,
+                    expiresAt: payload.expiresAt,
+                    sharedAt: payload.sharedAt,
+                    saveKey: payload.saveKey ?? null,
+                    contentHash: payload.contentHash ?? null,
+                };
+                break;
+            case EventType.ROOM_CHAT_CLEARED:
+                if (!state.sharedSave || state.sharedSave.assetId === payload.assetId) state.sharedSave = null;
                 break;
             case EventType.PROPOSAL_SUBMITTED: {
                 const proposal = { ...payload.proposal, status: 'pending' };

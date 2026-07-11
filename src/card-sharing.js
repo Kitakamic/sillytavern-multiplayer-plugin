@@ -1,33 +1,13 @@
-function relayHttpOrigin(relayUrl) {
-    const url = new URL(relayUrl);
-    if (url.protocol === 'ws:') url.protocol = 'http:';
-    else if (url.protocol === 'wss:') url.protocol = 'https:';
-    else throw new Error('中继地址必须是 ws:// 或 wss://。');
-    return url.origin;
-}
-
-function requireSession({ clientId, sessionToken } = {}) {
-    if (!clientId || !sessionToken) throw new Error('缺少房间会话凭据，请重新连接。');
-    return {
-        'x-relay-client-id': clientId,
-        'x-relay-session-token': sessionToken,
-    };
-}
-
-async function responseError(response, fallback) {
-    try {
-        const body = await response.json();
-        const error = new Error(body.error || fallback);
-        if (body.code) error.code = body.code;
-        return error;
-    } catch {
-        return new Error(`${fallback}（HTTP ${response.status}）`);
-    }
-}
+import { relayHttpOrigin, requireSession, responseError, sha256Hex } from './relay-http.js';
 
 /**
  * 完整角色卡共享模块。UI 只需要知道“共享当前卡”和“导入共享卡”；
  * SillyTavern 导出/导入表单、Relay HTTP 地址和房间凭据都封装在这里。
+ *
+ * 去重（问题：跨房间同一张卡在客机攒副本）：
+ * - contentHash：导出 PNG 的 SHA-256，内容未变时房主跳过上传、客机跳过导入；
+ * - cardKey：房主“这一张卡”的稳定标识（clientId + 本地 avatar 文件名的哈希），
+ *   客机据此把同一张卡的历次更新覆盖写进同一个本地角色文件，聊天记录不丢。
  */
 export class CharacterCardSharing {
     constructor(contextProvider, fetchImpl = globalThis.fetch.bind(globalThis)) {
@@ -35,7 +15,11 @@ export class CharacterCardSharing {
         this.fetch = fetchImpl;
     }
 
-    async shareCurrentCard({ relayUrl, roomId, credentials }) {
+    /**
+     * 导出并上传当前角色卡。skipIfHash 命中（内容与已共享版本一致）时
+     * 不上传，返回 { unchanged: true }。
+     */
+    async shareCurrentCard({ relayUrl, roomId, credentials, skipIfHash = null }) {
         const context = this.#context();
         const character = this.#currentCharacter();
         const exported = await this.fetch('/api/characters/export', {
@@ -45,7 +29,14 @@ export class CharacterCardSharing {
         });
         if (!exported.ok) throw await responseError(exported, '导出当前角色卡失败。');
 
-        const card = new Blob([await exported.arrayBuffer()], { type: 'image/png' });
+        const bytes = await exported.arrayBuffer();
+        const contentHash = await sha256Hex(bytes);
+        const cardKey = (await sha256Hex(`${credentials?.clientId ?? ''}:${character.avatar}`))?.slice(0, 16) ?? null;
+        if (skipIfHash && contentHash && skipIfHash === contentHash) {
+            return { unchanged: true, characterName: character.name, contentHash };
+        }
+
+        const card = new Blob([bytes], { type: 'image/png' });
         const upload = await this.fetch(`${relayHttpOrigin(relayUrl)}/rooms/${encodeURIComponent(roomId)}/assets?kind=card`, {
             method: 'POST',
             headers: { ...requireSession(credentials), 'content-type': 'image/png' },
@@ -58,10 +49,16 @@ export class CharacterCardSharing {
             characterName: character.name,
             bytes: result.bytes,
             expiresAt: result.expiresAt,
+            ...(cardKey ? { cardKey } : {}),
+            ...(contentHash ? { contentHash } : {}),
         };
     }
 
-    async importSharedCard({ relayUrl, roomId, assetId, credentials }) {
+    /**
+     * 下载并导入共享卡。preservedName（不带 .png）由调用方决定：
+     * 复用旧文件名即为覆盖更新，聊天记录保留。
+     */
+    async importSharedCard({ relayUrl, roomId, assetId, credentials, preservedName }) {
         const context = this.#context();
         const download = await this.fetch(`${relayHttpOrigin(relayUrl)}/rooms/${encodeURIComponent(roomId)}/assets/${encodeURIComponent(assetId)}`, {
             headers: requireSession(credentials),
@@ -70,7 +67,6 @@ export class CharacterCardSharing {
         if (!download.ok) throw await responseError(download, '下载完整角色卡失败。');
 
         const card = new Blob([await download.arrayBuffer()], { type: 'image/png' });
-        const preservedName = `stmp_${String(roomId).replace(/[^A-Za-z0-9_-]/g, '_')}`;
         const form = new FormData();
         form.append('avatar', card, `${preservedName}.png`);
         form.append('file_type', 'png');
@@ -93,6 +89,21 @@ export class CharacterCardSharing {
         if (characterId < 0) throw new Error('角色卡已导入，但未能在角色列表中找到。');
         await context.selectCharacterById(characterId);
         return { avatarFileName, characterId };
+    }
+
+    /** 本地是否已有该 avatar 文件名的角色（去重复用前的存在性检查）。 */
+    hasCharacter(avatarFileName) {
+        const context = this.#context();
+        return (context.characters ?? []).some((character) => character.avatar === avatarFileName);
+    }
+
+    /** 选中指定 avatar 文件名的角色；不存在时返回 false。 */
+    async selectByAvatar(avatarFileName) {
+        const context = this.#context();
+        const characterId = (context.characters ?? []).findIndex((character) => character.avatar === avatarFileName);
+        if (characterId < 0) return false;
+        await context.selectCharacterById(characterId);
+        return true;
     }
 
     #currentCharacter() {

@@ -51,7 +51,7 @@ const PROPOSAL_STATUS_TEXT = {
     withdrawn: '↩️ 已撤回',
 };
 
-export function mountMultiplayerPanel({ settings, store, relay, cardSharing, saveSettings }) {
+export function mountMultiplayerPanel({ settings, store, relay, cardSharing, saveSharing, saveSettings }) {
     if ($(`#${PANEL_ID}`).length) return;
 
     const container = $('#extensions_settings2').length ? $('#extensions_settings2') : $('#extensions_settings');
@@ -60,6 +60,10 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         return;
     }
 
+    // 客机导入记录（跨会话持久化）：同一张卡/同一份存档复用同一个本地文件。
+    settings.importedCards ??= {};
+    settings.importedSaves ??= {};
+
     // ---------- 控制层状态 ----------
     let helloDone = false;
     let expectHello = false;
@@ -67,7 +71,12 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
     let lastInviteCode = '';
     let importingCardAssetId = null;
     let importedCardAssetId = null;
+    let importedCardFileName = null;
     let cardImportScheduled = false;
+    let importingSaveAssetId = null;
+    let importedSaveAssetId = null;
+    let importedSaveFileName = null;
+    let saveImportScheduled = false;
 
     function helloPayload() {
         const payload = { displayName: settings.displayName || '玩家' };
@@ -195,7 +204,9 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
             relayUrl: settings.relayUrl,
             roomId: snapshot.room.roomId,
             credentials: settings.credentials,
+            skipIfHash: snapshot.sharedCard?.contentHash ?? null,
         });
+        if (shared.unchanged) return shared;
         await relay.request(createCommand(CommandType.ROOM_CARD_UPDATE, shared));
 
         // 更新卡片后立即撤销旧资产；clear 事件携带旧 ID，不会清掉新投影。
@@ -203,6 +214,28 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
             await relay.request(createCommand(CommandType.ROOM_CARD_CLEAR, { assetId: previousAssetId }));
         }
         return shared;
+    }
+
+    function sanitizeToken(value) {
+        return String(value).replace(/[^A-Za-z0-9]/g, '');
+    }
+
+    /** 客机导入记录查找：优先按 cardKey（同一张卡的更新），退而按内容哈希（同卡进了新房间）。 */
+    function findImportedCardRecord(card) {
+        if (!card) return null;
+        if (card.cardKey && settings.importedCards[card.cardKey]) return settings.importedCards[card.cardKey];
+        if (card.contentHash) {
+            for (const record of Object.values(settings.importedCards)) {
+                if (record.contentHash && record.contentHash === card.contentHash) return record;
+            }
+        }
+        return null;
+    }
+
+    function rememberImportedCard(card, fileName) {
+        if (!card.cardKey) return;
+        settings.importedCards[card.cardKey] = { contentHash: card.contentHash ?? null, fileName };
+        saveSettings();
     }
 
     async function importSharedCard(card, force = false) {
@@ -213,19 +246,40 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
         importingCardAssetId = card.assetId;
         render();
         try {
-            await cardSharing.importSharedCard({
+            const known = findImportedCardRecord(card);
+
+            // 内容未变且本地副本还在：不下载不导入，直接复用。
+            if (!force && known && card.contentHash && known.contentHash === card.contentHash && cardSharing.hasCharacter(known.fileName)) {
+                await cardSharing.selectByAvatar(known.fileName);
+                importedCardAssetId = card.assetId;
+                importedCardFileName = known.fileName;
+                rememberImportedCard(card, known.fileName);
+                toastr.info(`角色卡与本地副本一致，已复用：${card.characterName}`, '联机酒馆');
+                return;
+            }
+
+            // 复用旧文件名 = 原地覆盖更新（挂在角色下的聊天不丢）；
+            // 首次导入按内容哈希命名，同一张卡换房间不再产生新副本。
+            const preservedName = known && cardSharing.hasCharacter(known.fileName)
+                ? known.fileName.replace(/\.png$/, '')
+                : `stmp_${sanitizeToken(card.contentHash ?? card.assetId).slice(0, 12)}`;
+            const result = await cardSharing.importSharedCard({
                 relayUrl: settings.relayUrl,
                 roomId: store.snapshot.room.roomId,
                 assetId: card.assetId,
                 credentials: settings.credentials,
+                preservedName,
             });
             importedCardAssetId = card.assetId;
+            importedCardFileName = result.avatarFileName;
+            rememberImportedCard(card, result.avatarFileName);
             toastr.success(`已同步完整角色卡：${card.characterName}`, '联机酒馆');
         } finally {
             importingCardAssetId = null;
             render();
             const latest = store.snapshot.sharedCard;
             if (latest && latest.assetId !== card.assetId) scheduleSharedCardImport();
+            else scheduleSharedSaveImport(); // 联机存档可能在等镜像角色就位
         }
     }
 
@@ -239,6 +293,89 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
             if (!card || store.role !== 'guest') return;
             void importSharedCard(card).catch((error) => {
                 console.error('[ST Multiplayer] 自动导入共享角色卡失败：', error);
+                toastr.error(`${errorText(error)} 可在联机面板中重试。`, '联机酒馆');
+            });
+        });
+    }
+
+    async function shareCurrentSave() {
+        const snapshot = store.snapshot;
+        if (snapshot.room?.role !== 'host') throw new Error('只有房主可以共享联机存档。');
+        const previousAssetId = snapshot.sharedSave?.assetId;
+        const shared = await saveSharing.shareCurrentSave({
+            relayUrl: settings.relayUrl,
+            roomId: snapshot.room.roomId,
+            credentials: settings.credentials,
+            skipIfHash: snapshot.sharedSave?.contentHash ?? null,
+        });
+        if (shared.unchanged) return shared;
+        await relay.request(createCommand(CommandType.ROOM_CHAT_UPDATE, shared));
+
+        // 与共享卡同理：新快照发布后立即撤销旧资产。
+        if (previousAssetId && previousAssetId !== shared.assetId) {
+            await relay.request(createCommand(CommandType.ROOM_CHAT_CLEAR, { assetId: previousAssetId }));
+        }
+        return shared;
+    }
+
+    async function importSharedSave(save, force = false) {
+        if (!save || store.role !== 'guest') return;
+        if (!force && importedSaveAssetId === save.assetId) return;
+        if (importingSaveAssetId) return;
+
+        // 存档要写在镜像角色名下；角色卡还没同步时先等（卡片导入完成后会再触发）。
+        const targetAvatar = importedCardFileName ?? findImportedCardRecord(store.snapshot.sharedCard)?.fileName ?? null;
+        if (!targetAvatar || !cardSharing.hasCharacter(targetAvatar)) {
+            render();
+            return;
+        }
+
+        // 内容没变就不重写本地文件（手动“重新导入”例外）。
+        const record = save.saveKey ? settings.importedSaves[save.saveKey] : null;
+        if (!force && record && save.contentHash && record.contentHash === save.contentHash) {
+            importedSaveAssetId = save.assetId;
+            importedSaveFileName = record.fileName;
+            render();
+            return;
+        }
+
+        importingSaveAssetId = save.assetId;
+        render();
+        try {
+            const fileName = record?.fileName ?? `联机存档-${sanitizeToken(save.saveKey ?? save.assetId).slice(0, 8)}`;
+            const result = await saveSharing.importSharedSave({
+                relayUrl: settings.relayUrl,
+                roomId: store.snapshot.room.roomId,
+                assetId: save.assetId,
+                credentials: settings.credentials,
+                targetAvatar,
+                fileName,
+            });
+            importedSaveAssetId = save.assetId;
+            importedSaveFileName = result.fileName;
+            if (save.saveKey) {
+                settings.importedSaves[save.saveKey] = { contentHash: save.contentHash ?? null, fileName: result.fileName };
+                saveSettings();
+            }
+            toastr.success(`已同步联机存档：${save.chatName}（${save.messageCount} 条消息）`, '联机酒馆');
+        } finally {
+            importingSaveAssetId = null;
+            render();
+            const latest = store.snapshot.sharedSave;
+            if (latest && latest.assetId !== save.assetId) scheduleSharedSaveImport();
+        }
+    }
+
+    /** 合并 resume 回放，只导入回放结束后的最终共享存档。 */
+    function scheduleSharedSaveImport() {
+        if (saveImportScheduled) return;
+        saveImportScheduled = true;
+        queueMicrotask(() => {
+            saveImportScheduled = false;
+            const save = store.snapshot.sharedSave;
+            if (!save || store.role !== 'guest') return;
+            void importSharedSave(save).catch((error) => {
+                console.error('[ST Multiplayer] 自动导入联机存档失败：', error);
                 toastr.error(`${errorText(error)} 可在联机面板中重试。`, '联机酒馆');
             });
         });
@@ -348,6 +485,17 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                         <div class="stmp-card-guest" style="display: none;">
                             <div class="stmp-card-status stmp-empty"></div>
                             <button class="stmp-card-import menu_button" style="display: none;">重新导入</button>
+                        </div>
+                    </div>
+                    <div class="stmp-section stmp-save-section">
+                        <div class="stmp-section-title">联机存档</div>
+                        <div class="stmp-save-host" style="display: none;">
+                            <div class="stmp-save-status stmp-empty"></div>
+                            <button class="stmp-save-share menu_button">共享当前聊天存档</button>
+                        </div>
+                        <div class="stmp-save-guest" style="display: none;">
+                            <div class="stmp-save-status stmp-empty"></div>
+                            <button class="stmp-save-import menu_button" style="display: none;">重新导入存档</button>
                         </div>
                     </div>
                     <div class="stmp-section">
@@ -527,7 +675,8 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                 );
                 if (!confirmed) return;
                 const shared = await shareCurrentCard();
-                toastr.success(`已共享完整角色卡：${shared.characterName}`, '联机酒馆');
+                if (shared.unchanged) toastr.info('角色卡内容未变化。', '联机酒馆');
+                else toastr.success(`已共享完整角色卡：${shared.characterName}`, '联机酒馆');
                 return;
             }
 
@@ -539,11 +688,28 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
 
     windowEl.find('.stmp-card-refresh').on('click', guarded(async () => {
         const shared = await shareCurrentCard();
-        toastr.success(`已更新共享角色卡：${shared.characterName}`, '联机酒馆');
+        if (shared.unchanged) toastr.info('角色卡内容未变化，无需更新。', '联机酒馆');
+        else toastr.success(`已更新共享角色卡：${shared.characterName}`, '联机酒馆');
     }));
 
     windowEl.find('.stmp-card-import').on('click', guarded(async () => {
         await importSharedCard(store.snapshot.sharedCard, true);
+    }));
+
+    windowEl.find('.stmp-save-share').on('click', guarded(async () => {
+        if (!store.snapshot.sharedSave) {
+            const confirmed = window.confirm(
+                '联机存档是当前聊天的完整 jsonl（含全部消息、未采用的备选回复与聊天设置），房间成员将获得完整副本用于续局。确定共享吗？',
+            );
+            if (!confirmed) return;
+        }
+        const shared = await shareCurrentSave();
+        if (shared.unchanged) toastr.info('存档内容未变化，无需更新。', '联机酒馆');
+        else toastr.success(`已共享联机存档：${shared.chatName}（${shared.messageCount} 条消息）`, '联机酒馆');
+    }));
+
+    windowEl.find('.stmp-save-import').on('click', guarded(async () => {
+        await importSharedSave(store.snapshot.sharedSave, true);
     }));
 
     // 提案/成员列表内的动态按钮走事件委托。
@@ -616,6 +782,30 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
                         ? `已同步：${sharedCard.characterName}`
                         : `可同步：${sharedCard.characterName}`);
             windowEl.find('.stmp-card-import').toggle(Boolean(sharedCard) && !importing);
+        }
+
+        const sharedSave = snapshot.sharedSave;
+        windowEl.find('.stmp-save-host').toggle(isHost);
+        windowEl.find('.stmp-save-guest').toggle(!isHost);
+        if (isHost) {
+            windowEl.find('.stmp-save-host .stmp-save-status').text(sharedSave
+                ? `已共享：${sharedSave.chatName}（${sharedSave.messageCount} 条消息，${Math.ceil(sharedSave.bytes / 1024)} KB）`
+                : '把当前聊天（jsonl）作为这一局的存档共享给成员，玩一半也能改天续上。');
+            windowEl.find('.stmp-save-share').text(sharedSave ? '更新联机存档' : '共享当前聊天存档');
+        } else {
+            const importingSave = sharedSave && importingSaveAssetId === sharedSave.assetId;
+            const importedSave = sharedSave && importedSaveAssetId === sharedSave.assetId;
+            const mirrorReady = Boolean(importedCardFileName && cardSharing.hasCharacter(importedCardFileName));
+            windowEl.find('.stmp-save-guest .stmp-save-status').text(!sharedSave
+                ? '房主尚未共享联机存档。'
+                : importingSave
+                    ? `正在导入存档：${sharedSave.chatName}……`
+                    : importedSave
+                        ? `已同步存档：${sharedSave.chatName}（${sharedSave.messageCount} 条消息${importedSaveFileName ? `，本地聊天「${importedSaveFileName}」` : ''}）`
+                        : mirrorReady
+                            ? `可同步存档：${sharedSave.chatName}`
+                            : '等待角色卡同步完成后自动导入存档。');
+            windowEl.find('.stmp-save-import').toggle(Boolean(sharedSave) && !importingSave);
         }
 
         const members = windowEl.find('.stmp-members').empty();
@@ -716,6 +906,7 @@ export function mountMultiplayerPanel({ settings, store, relay, cardSharing, sav
     store.addEventListener('change', () => render());
     store.addEventListener('event', (event) => {
         if ([EventType.ROOM_CARD_UPDATED, EventType.ROOM_CARD_CLEARED].includes(event.detail.type)) scheduleSharedCardImport();
+        if ([EventType.ROOM_CHAT_UPDATED, EventType.ROOM_CHAT_CLEARED].includes(event.detail.type)) scheduleSharedSaveImport();
     });
     store.addEventListener('desync', () => {
         console.warn('[ST Multiplayer] 事件序列出现缺口，触发 room.resume 兜底。');
