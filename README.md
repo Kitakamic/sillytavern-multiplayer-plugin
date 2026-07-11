@@ -11,7 +11,7 @@ Each participant keeps their own local SillyTavern instance. This extension conn
 - A private WSS Relay for invitations, room membership, ordering, and reconnects.
 - Host-only writes to the selected local chat and host-only AI generation.
 
-V1 deliberately excludes general attachments, voice, host migration, peer-to-peer generation, and any writes to a guest's own chats or characters. The guest-side story can render in a dedicated plugin-managed mirror chat, and the host may explicitly share the character card to the room (see `docs/V1-PLAN.md`, phase P3).
+V1 deliberately excludes general attachments, voice, host migration, peer-to-peer generation, and any writes to a guest's own chats or characters. The guest-side story renders in a dedicated plugin-managed mirror chat — the primary guest interface, gated on an up-front technical validation — while a slim control-center panel handles rooms, proposals, and side chat; the host may explicitly share the character card to the room (see `docs/V1-PLAN.md`, phases P1 and P3).
 
 ## Development installation
 
@@ -39,5 +39,5 @@ The matching relay service lives in the sibling `sillytavern-multiplayer-relay` 
 
 ## Status
 
-Phase P0 (protocol and connection layer) is complete: the command vocabulary and invite-code utilities live in `src/protocol.js`, and `src/relay-client.js` provides request/ack correlation, automatic reconnection with exponential backoff, and heartbeat-based dead-connection detection (validated by `scripts/smoke-client.mjs`). Room UI (P1) and host chat bridging (P2) follow per `docs/V1-PLAN.md`.
+Phase P0 (protocol and connection layer) is complete: the command vocabulary and invite-code utilities live in `src/protocol.js`, and `src/relay-client.js` provides request/ack correlation, automatic reconnection with exponential backoff, and heartbeat-based dead-connection detection (validated by `scripts/smoke-client.mjs`). Next is P1 — the mirror-mode technical validation (four local checks, done first) plus the control-center panel — then host chat bridging (P2) and the mirror chat itself (P3), per `docs/V1-PLAN.md`.
 

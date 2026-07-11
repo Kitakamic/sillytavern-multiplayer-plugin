@@ -26,6 +26,7 @@ export const CommandType = Object.freeze({
 /**
  * 事件词汇表（中继 → 客户端）。必须与 relay 的 src/core/protocol.ts 一致；
  * 信封为 {v, kind:'event', type, eventId, roomId, seq, payload}，seq 在房间内单调递增。
+ * generation.* 为瞬态事件：无 seq、不入房间日志，仅对在线成员广播。
  */
 export const EventType = Object.freeze({
     ROOM_MEMBER_JOINED: 'room.member.joined',
@@ -33,6 +34,15 @@ export const EventType = Object.freeze({
     ROOM_MEMBER_ONLINE: 'room.member.online',
     ROOM_MEMBER_OFFLINE: 'room.member.offline',
     ROOM_CLOSED: 'room.closed',
+    PROPOSAL_SUBMITTED: 'proposal.submitted',
+    PROPOSAL_WITHDRAWN: 'proposal.withdrawn',
+    PROPOSAL_ACCEPTED: 'proposal.accepted',
+    PROPOSAL_REJECTED: 'proposal.rejected',
+    STORY_MESSAGE_PUBLISHED: 'story.message.published',
+    SIDECHAT_MESSAGE_POSTED: 'sidechat.message.posted',
+    GENERATION_STARTED: 'generation.started',
+    GENERATION_PROGRESSED: 'generation.progressed',
+    GENERATION_FINISHED: 'generation.finished',
 });
 
 /** 错误帧 payload.code 的取值。必须与 relay 的 src/core/protocol.ts 一致；UI 据此显示中文文案。 */
@@ -47,6 +57,7 @@ export const ErrorCode = Object.freeze({
     INVITE_INVALID: 'INVITE_INVALID',
     FORBIDDEN: 'FORBIDDEN',
     TARGET_NOT_FOUND: 'TARGET_NOT_FOUND',
+    PROPOSAL_NOT_PENDING: 'PROPOSAL_NOT_PENDING',
     NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
     UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
     INTERNAL: 'INTERNAL',
