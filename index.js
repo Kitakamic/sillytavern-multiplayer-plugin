@@ -6,6 +6,20 @@ import { RoomStore } from './src/room-store.js';
 import { mountMultiplayerPanel } from './src/ui.js';
 
 const EXTENSION_KEY = 'sillytavernMultiplayer';
+
+/**
+ * 生成拦截器（manifest.generate_interceptor 指向的全局函数）：
+ * 具体判定逻辑由 ui.js 在挂载后注册——客机在镜像角色上时中止本地生成。
+ */
+const generateInterceptor = { handler: null };
+globalThis.stMultiplayerGenerateInterceptor = async function (chat, contextSize, abort, type) {
+    try {
+        await generateInterceptor.handler?.(chat, contextSize, abort, type);
+    } catch (error) {
+        console.error('[ST Multiplayer] 生成拦截器执行失败：', error);
+    }
+};
+
 const DEFAULT_SETTINGS = Object.freeze({
     relayUrl: '',
     displayName: '',
@@ -60,6 +74,7 @@ function initialize() {
         cardSharing,
         saveSharing,
         saveSettings: () => context.saveSettingsDebounced(),
+        registerGenerateInterceptor: (handler) => { generateInterceptor.handler = handler; },
     });
 
     console.debug('[ST Multiplayer] Extension scaffold loaded.');

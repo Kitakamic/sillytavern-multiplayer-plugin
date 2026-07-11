@@ -1,12 +1,13 @@
 /**
- * 房主桥接（P2，最脆弱层）：把共享时间线写进房主的真实聊天、触发生成、
- * 捕获流式与最终回复。铁律：只通过 SillyTavern.getContext() 访问酒馆能力，
- * 不 import 酒馆内部模块路径。
+ * 房主桥接与原生聊天写入（P2/P3 共用，最脆弱层）：把共享时间线写进本地
+ * 打开的聊天（房主 = 真实聊天，客机 = 镜像聊天）、给自己的原生发言打同步
+ * 标记、维护客机侧的流式气泡。铁律：只通过 SillyTavern.getContext() 访问
+ * 酒馆能力，不 import 酒馆内部模块路径。
  *
  * 一致性模型：
- * - 房主的真实聊天是唯一真身；relay 事件按 seq 到达，user 消息由本模块写入；
- * - 每条写入的消息在 extra.stmpMessageId 打标，重放/重连/补写天然幂等；
- * - assistant 消息由生成流程产生（本来就在聊天里），永不经本模块写入。
+ * - relay 事件按 seq 到达，故事消息由本模块写入本地聊天；
+ * - 每条同步过的消息在 extra.stmpMessageId 打标——重放/重连/补写天然幂等，
+ *   自己经原生输入框发出的消息由回声事件补标，不会二次写入。
  */
 
 const REQUIRED_APIS = [
@@ -21,14 +22,13 @@ const REQUIRED_APIS = [
     'getRequestHeaders',
 ];
 
-const STREAM_THROTTLE_MS = 300;
 const REPLY_SETTLE_TIMEOUT_MS = 3000;
 
 export function createHostBridge(contextProvider) {
     const getContext = () => (typeof contextProvider === 'function' ? contextProvider() : contextProvider);
 
     let binding = null; // { chatId, characterAvatar, characterName }
-    let generatingNow = false;
+    let streamBubbleId = null; // 流式气泡消息的 extra 标记（客机侧）
 
     function missingApis() {
         const context = getContext();
@@ -67,6 +67,7 @@ export function createHostBridge(contextProvider) {
 
     function unbind() {
         binding = null;
+        streamBubbleId = null;
     }
 
     function hasMessage(messageId) {
@@ -75,17 +76,17 @@ export function createHostBridge(contextProvider) {
     }
 
     /**
-     * 把一条成员发言写入绑定聊天。push/渲染同步完成（保证事件顺序 = 聊天顺序），
-     * 落盘异步。已写过（extra 标记）或绑定聊天未打开时返回 false。
+     * 把一条时间线消息写入绑定聊天。push/渲染同步完成（保证事件顺序 =
+     * 聊天顺序），落盘异步。已写过或绑定聊天未打开时返回 written: false。
      */
-    function writeUserMessage({ messageId, authorName, text }) {
+    function writeStoryMessage({ messageId, authorName, text, role }) {
         if (!isBoundChatOpen()) return { written: false, reason: 'chat_not_open' };
         if (hasMessage(messageId)) return { written: false, reason: 'duplicate' };
 
         const context = getContext();
         const message = {
             name: authorName,
-            is_user: true,
+            is_user: role === 'user',
             is_system: false,
             send_date: new Date().toLocaleString(),
             mes: text,
@@ -99,57 +100,44 @@ export function createHostBridge(contextProvider) {
         return { written: true, saved };
     }
 
-    /** 补写：把时间线里还没进聊天的 user 消息按序写入（幂等，生成前必调）。 */
-    function catchUp(timeline) {
+    /**
+     * 自己经原生输入框发出的消息：回声事件到达时按文本从尾部反查、补上
+     * 同步标记，避免二次写入。找不到（比如已被编辑）返回 false。
+     */
+    function tagLocalMessage({ messageId, text }) {
+        if (!isBoundChatOpen()) return false;
+        if (hasMessage(messageId)) return true;
+        const chat = getContext().chat ?? [];
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const message = chat[i];
+            if (!message?.is_user || message.is_system) continue;
+            if (message.extra?.stmpMessageId) continue;
+            if (String(message.mes ?? '').trim() !== text) continue;
+            message.extra = { ...message.extra, stmpMessageId: messageId };
+            return true;
+        }
+        return false;
+    }
+
+    /** 补写：把时间线里还没进聊天的消息按序写入（幂等）。 */
+    function catchUp(timeline, { includeAssistant = false } = {}) {
         if (!isBoundChatOpen()) return 0;
         let written = 0;
         for (const entry of timeline) {
-            if (entry.role !== 'user') continue;
-            const result = writeUserMessage({ messageId: entry.messageId, authorName: entry.authorName, text: entry.text });
+            if (entry.role !== 'user' && !(includeAssistant && entry.role === 'assistant')) continue;
+            const result = writeStoryMessage({
+                messageId: entry.messageId,
+                authorName: entry.authorName,
+                text: entry.text,
+                role: entry.role,
+            });
             if (result.written) written += 1;
         }
         return written;
     }
 
-    /**
-     * 触发一次生成并捕获结果。onProgress(累计全文) 已按 STREAM_THROTTLE_MS 节流。
-     * 返回 { text, name }；生成没有产出新的 AI 消息时返回 null。
-     */
-    async function generateReply({ onProgress } = {}) {
-        if (!isBoundChatOpen()) throw new Error('绑定的聊天未打开，请切回后重试。');
-        if (generatingNow) throw new Error('已有一次生成在进行中。');
-
-        const context = getContext();
-        const { eventSource, eventTypes } = context;
-        const baseline = context.chat.length;
-
-        generatingNow = true;
-        let lastSent = 0;
-        const onToken = (text) => {
-            if (typeof text !== 'string' || !onProgress) return;
-            const now = Date.now();
-            if (now - lastSent < STREAM_THROTTLE_MS) return;
-            lastSent = now;
-            try {
-                onProgress(text);
-            } catch (error) {
-                console.warn('[ST Multiplayer] 流式转发失败（忽略，继续生成）：', error);
-            }
-        };
-
-        eventSource.on(eventTypes.STREAM_TOKEN_RECEIVED, onToken);
-        try {
-            await context.generate();
-            // Generate 的 promise 结算与消息定稿之间存在窗口；轮询兜底。
-            const reply = await waitForReply(baseline);
-            return reply;
-        } finally {
-            eventSource.removeListener(eventTypes.STREAM_TOKEN_RECEIVED, onToken);
-            generatingNow = false;
-        }
-    }
-
-    async function waitForReply(baseline) {
+    /** 生成结束后捕获 baseline 之后的最新 AI 消息（消息定稿与事件之间有窗口，轮询兜底）。 */
+    async function captureReplySince(baseline) {
         const deadline = Date.now() + REPLY_SETTLE_TIMEOUT_MS;
         for (;;) {
             const chat = getContext().chat ?? [];
@@ -164,6 +152,69 @@ export function createHostBridge(contextProvider) {
         }
     }
 
+    // ---------- 客机侧流式气泡：生成期间在镜像聊天里实时刷新的 AI 消息 ----------
+
+    function findStreamBubble() {
+        if (!streamBubbleId) return null;
+        const chat = getContext().chat ?? [];
+        const index = chat.findIndex((message) => message?.extra?.stmpStreamBubble === streamBubbleId);
+        return index >= 0 ? { index, message: chat[index] } : null;
+    }
+
+    function hasStreamBubble() {
+        return findStreamBubble() !== null;
+    }
+
+    function beginStreamBubble(name) {
+        if (!isBoundChatOpen() || hasStreamBubble()) return false;
+        const context = getContext();
+        streamBubbleId = `bubble-${Date.now()}`;
+        const message = {
+            name,
+            is_user: false,
+            is_system: false,
+            send_date: new Date().toLocaleString(),
+            mes: '……',
+            extra: { stmpStreamBubble: streamBubbleId },
+        };
+        context.chat.push(message);
+        context.addOneMessage(message);
+        return true;
+    }
+
+    function updateStreamBubble(text) {
+        const bubble = findStreamBubble();
+        if (!bubble) return false;
+        bubble.message.mes = text;
+        getContext().updateMessageBlock?.(bubble.index, bubble.message);
+        return true;
+    }
+
+    /** 权威消息到达 → 原地定稿；final 传 null → 生成失败，移除气泡。 */
+    function endStreamBubble(final) {
+        const bubble = findStreamBubble();
+        streamBubbleId = null;
+        if (!bubble) return false;
+        const context = getContext();
+        if (final) {
+            bubble.message.mes = final.text;
+            if (final.name) bubble.message.name = final.name;
+            bubble.message.extra = { stmpMessageId: final.messageId, stmpAuthor: final.name ?? bubble.message.name };
+            context.updateMessageBlock?.(bubble.index, bubble.message);
+        } else {
+            context.chat.splice(bubble.index, 1);
+            // 移除中段消息后整页重绘（clearChat + printMessages，均经 getContext 暴露）。
+            try {
+                context.clearChat?.();
+                context.printMessages?.();
+            } catch (error) {
+                console.warn('[ST Multiplayer] 移除流式气泡后的重绘失败：', error);
+            }
+        }
+        void Promise.resolve(context.saveChat()).catch(() => { /* 尽力而为 */ });
+        return true;
+    }
+
     return {
         missingApis,
         isBound,
@@ -171,10 +222,14 @@ export function createHostBridge(contextProvider) {
         bindCurrentChat,
         unbind,
         get binding() { return binding ? { ...binding } : null; },
-        get generating() { return generatingNow; },
         hasMessage,
-        writeUserMessage,
+        writeStoryMessage,
+        tagLocalMessage,
         catchUp,
-        generateReply,
+        captureReplySince,
+        hasStreamBubble,
+        beginStreamBubble,
+        updateStreamBubble,
+        endStreamBubble,
     };
 }

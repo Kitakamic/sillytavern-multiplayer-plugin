@@ -43,7 +43,7 @@ function errorText(error) {
     return ERROR_TEXT[error?.code] ?? error?.message ?? '未知错误。';
 }
 
-export function mountMultiplayerPanel({ settings, store, relay, hostBridge, cardSharing, saveSharing, saveSettings }) {
+export function mountMultiplayerPanel({ settings, store, relay, hostBridge, cardSharing, saveSharing, saveSettings, registerGenerateInterceptor }) {
     if ($(`#${PANEL_ID}`).length) return;
 
     const container = $('#extensions_settings2').length ? $('#extensions_settings2') : $('#extensions_settings');
@@ -353,6 +353,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             toastr.success(`已同步联机存档：${save.chatName}（${save.messageCount} 条消息）`, '联机酒馆');
         } finally {
             importingSaveAssetId = null;
+            maybeBindGuestMirror();
             render();
             const latest = store.snapshot.sharedSave;
             if (latest && latest.assetId !== save.assetId) scheduleSharedSaveImport();
@@ -401,37 +402,178 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         }
     }
 
-    /** 房主收束回合：补写遗漏的成员发言 → 触发生成 → 流式转发 → 发布权威回复。 */
+    /** 房主收束回合：补写遗漏的成员发言，然后触发一次原生生成（同步由生成观察钩子接管）。 */
     async function hostGenerate() {
         if (store.role !== 'host') throw new Error('只有房主可以触发生成。');
         if (!hostBridge.isBound()) throw new Error('请先点"一键同步"绑定当前聊天。');
         if (!hostBridge.isBoundChatOpen()) throw new Error('绑定的聊天未打开，请切回后重试。');
-        if (hostBridge.generating || hostIsGenerating()) throw new Error('AI 正在生成中。');
+        if (hostIsGenerating()) throw new Error('AI 正在生成中。');
 
         hostBridge.catchUp(store.snapshot.timeline);
-        await relay.request(createCommand(CommandType.GENERATION_START));
-        let ok = false;
+        await stContext().generate();
+    }
+
+    // ---------- 原生聊天同步（P3）：输入走酒馆输入框，故事渲染进真实聊天 ----------
+
+    function stContext() {
+        return globalThis.SillyTavern?.getContext?.();
+    }
+
+    function personaName() {
+        return settings.personaName || settings.displayName || '玩家';
+    }
+
+    /** 客机镜像是否就绪：卡与存档已导入，且镜像聊天正在前台打开。 */
+    function guestMirrorReady() {
+        return store.role === 'guest' && Boolean(importedSaveFileName) && hostBridge.isBoundChatOpen();
+    }
+
+    /** 客机切到镜像聊天时自动绑定并补写落下的故事。 */
+    function maybeBindGuestMirror() {
+        if (store.role !== 'guest' || !importedCardFileName || !importedSaveFileName) return;
+        if (hostBridge.isBoundChatOpen()) return;
+        const context = stContext();
+        const character = context?.characters?.[context.characterId];
+        if (character?.avatar !== importedCardFileName || context.chatId !== importedSaveFileName) return;
         try {
-            const reply = await hostBridge.generateReply({
-                onProgress: (text) => {
-                    void relay.request(createCommand(CommandType.GENERATION_PROGRESS, {
-                        text: text.slice(0, 16000),
-                        charCount: text.length,
-                    })).catch(() => { /* 流式预览丢帧无所谓 */ });
-                },
-            });
-            if (!reply) throw new Error('生成结束，但没有捕获到 AI 回复（可能被中止）。');
-            if (reply.text.length > 8000) toastr.warning('AI 回复超过 8000 字，共享时间线中已截断（房主本地聊天完整）。', '联机酒馆');
-            await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
-                text: reply.text.slice(0, 8000),
-                authorName: reply.name || '角色',
-                role: 'assistant',
-            }));
-            ok = true;
-        } finally {
-            await relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })).catch(() => { /* 尽力而为 */ });
+            hostBridge.bindCurrentChat();
+            hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
+            render();
+        } catch (error) {
+            console.warn('[ST Multiplayer] 绑定镜像聊天失败：', error);
         }
     }
+
+    /** 原生输入框发出的消息 → 发布到房间；ack 后打同步标记（回声事件亦会补标）。 */
+    async function onNativeMessageSent(index) {
+        if (!store.inRoom || relay.state !== 'connected') return;
+        const eligible = store.role === 'host' ? hostBridge.isBoundChatOpen() : guestMirrorReady();
+        if (!eligible) return;
+        const message = stContext()?.chat?.[index];
+        if (!message?.is_user || message.is_system) return;
+        if (message.extra?.stmpMessageId) return; // 本插件写入的消息，勿回传
+        const text = String(message.mes ?? '').trim();
+        if (!text) return;
+        try {
+            const ack = await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
+                text: text.slice(0, 8000),
+                authorName: personaName(),
+                role: 'user',
+            }));
+            message.extra = { ...message.extra, stmpMessageId: message.extra?.stmpMessageId ?? ack.payload.messageId };
+        } catch (error) {
+            toastr.error(`这条发言没有同步到房间（${errorText(error)}），其他成员看不到。`, '联机酒馆');
+        }
+    }
+
+    // 房主端生成观察：原生触发的生成（含输入框发送后的自动生成）也全程转发。
+    let genWatch = null;
+    let lastStreamSent = 0;
+
+    function onGenerationStarted(type, _params, dryRun) {
+        // 只转发普通生成；swipe/regenerate/continue 是对已有消息的修改，
+        // 直接转发会在时间线上追加重复内容——那些走"一键同步"重同步。
+        if (dryRun || (type !== undefined && type !== 'normal')) return;
+        if (store.role !== 'host' || !store.inRoom || !hostBridge.isBoundChatOpen()) return;
+        genWatch = { baseline: stContext().chat.length };
+        lastStreamSent = 0;
+        void relay.request(createCommand(CommandType.GENERATION_START)).catch(() => { /* 状态广播尽力而为 */ });
+    }
+
+    function onStreamToken(text) {
+        if (!genWatch || typeof text !== 'string' || !text) return;
+        const now = Date.now();
+        if (now - lastStreamSent < 300) return;
+        lastStreamSent = now;
+        void relay.request(createCommand(CommandType.GENERATION_PROGRESS, {
+            text: text.slice(0, 16000),
+            charCount: text.length,
+        })).catch(() => { /* 流式预览丢帧无所谓 */ });
+    }
+
+    async function onGenerationEnded() {
+        if (!genWatch) return;
+        const { baseline } = genWatch;
+        genWatch = null;
+        let ok = false;
+        try {
+            const reply = await hostBridge.captureReplySince(baseline);
+            if (reply) {
+                if (reply.text.length > 8000) toastr.warning('AI 回复超过 8000 字，共享给成员的版本已截断（房主本地完整）。', '联机酒馆');
+                await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
+                    text: reply.text.slice(0, 8000),
+                    authorName: reply.name || '角色',
+                    role: 'assistant',
+                }));
+                ok = true;
+            }
+        } catch (error) {
+            toastr.error(`AI 回复未能同步到房间：${errorText(error)}`, '联机酒馆');
+        } finally {
+            void relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })).catch(() => { /* 尽力而为 */ });
+        }
+    }
+
+    /** relay 故事事件 → 写入本地聊天（房主写真实聊天，客机写镜像聊天）。 */
+    function applyStoryEventToChat(message) {
+        if (!message) return;
+        const isSelf = message.authorClientId === store.selfClientId;
+        if (store.role === 'host') {
+            if (!hostBridge.isBound()) return;
+            if (message.role !== 'user') return; // AI 回复本来就在房主聊天里
+            if (isSelf) {
+                hostBridge.tagLocalMessage({ messageId: message.messageId, text: message.text });
+                return;
+            }
+            hostBridge.writeStoryMessage({ messageId: message.messageId, authorName: message.authorName, text: message.text, role: 'user' });
+            return;
+        }
+        if (!guestMirrorReady()) return; // 切回镜像聊天时由 catchUp 补写
+        if (message.role === 'user') {
+            if (isSelf) {
+                hostBridge.tagLocalMessage({ messageId: message.messageId, text: message.text });
+                return;
+            }
+            hostBridge.writeStoryMessage({ messageId: message.messageId, authorName: message.authorName, text: message.text, role: 'user' });
+            return;
+        }
+        // assistant：生成期间有流式气泡则原地定稿，否则直接写入。
+        if (hostBridge.hasStreamBubble()) {
+            hostBridge.endStreamBubble({ text: message.text, messageId: message.messageId, name: message.authorName });
+        } else {
+            hostBridge.writeStoryMessage({ messageId: message.messageId, authorName: message.authorName, text: message.text, role: 'assistant' });
+        }
+    }
+
+    // 酒馆事件接线（eventSource 是单例，挂载时注册一次）。
+    (() => {
+        const context = stContext();
+        const es = context?.eventSource;
+        const et = context?.eventTypes;
+        if (!es || !et) {
+            console.warn('[ST Multiplayer] eventSource 不可用，原生聊天同步未启用。');
+            return;
+        }
+        es.on(et.MESSAGE_SENT, (index) => void onNativeMessageSent(index));
+        es.on(et.GENERATION_STARTED, (type, params, dryRun) => onGenerationStarted(type, params, dryRun));
+        es.on(et.STREAM_TOKEN_RECEIVED, (text) => onStreamToken(text));
+        es.on(et.GENERATION_ENDED, () => void onGenerationEnded());
+        es.on(et.CHAT_CHANGED, () => {
+            maybeBindGuestMirror();
+            // 切回绑定聊天时补写离开期间落下的故事（幂等）。
+            if (store.role === 'host' && hostBridge.isBoundChatOpen()) hostBridge.catchUp(store.snapshot.timeline);
+            if (guestMirrorReady()) hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
+            render();
+        });
+    })();
+
+    // 生成拦截器：客机在镜像角色上时中止本地生成（消息照发，AI 由房主生成）。
+    registerGenerateInterceptor?.((chat, contextSize, abort) => {
+        if (store.role !== 'guest' || !store.inRoom || !importedCardFileName) return;
+        const context = stContext();
+        const character = context?.characters?.[context.characterId];
+        if (character?.avatar === importedCardFileName) abort(true);
+    });
 
     // ---------- 设置抽屉 ----------
     const panel = $(`
@@ -567,19 +709,9 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                         <div class="stmp-section-title">成员</div>
                         <div class="stmp-members"></div>
                     </div>
-                    <details class="stmp-section stmp-timeline-details" open>
-                        <summary>共享故事</summary>
-                        <div class="stmp-timeline"></div>
-                    </details>
                     <div class="stmp-section">
-                        <div class="stmp-section-title">故事发言</div>
-                        <div class="stmp-story-editor">
-                            <textarea class="stmp-story-text text_pole" rows="2" placeholder="以你的角色行动/发言（全员实时可见，Ctrl+Enter 发送）……"></textarea>
-                            <div class="stmp-row">
-                                <button class="stmp-story-send menu_button">发送</button>
-                                <button class="stmp-story-send-gen menu_button" style="display: none;">发送并生成</button>
-                            </div>
-                        </div>
+                        <div class="stmp-section-title">回合</div>
+                        <div class="stmp-native-hint stmp-empty"></div>
                         <div class="stmp-row stmp-round-row">
                             <button class="stmp-round-ready menu_button stmp-mini">我说完了</button>
                             <button class="stmp-round-skip menu_button stmp-mini">跳过本回合</button>
@@ -595,6 +727,10 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                             <button class="stmp-sidechat-send menu_button">发送</button>
                         </div>
                     </div>
+                    <details class="stmp-section stmp-timeline-details">
+                        <summary>时间线（调试）</summary>
+                        <div class="stmp-timeline"></div>
+                    </details>
                     <div class="stmp-row stmp-room-actions">
                         <button class="stmp-leave menu_button">离开房间</button>
                     </div>
@@ -716,30 +852,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         toastr.success('邀请码已复制。', '联机酒馆');
     }));
 
-    async function sendStoryText() {
-        const text = String(windowEl.find('.stmp-story-text').val()).trim();
-        if (!text) return false;
-        await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
-            text,
-            authorName: settings.personaName || settings.displayName || '玩家',
-            role: 'user',
-        }));
-        windowEl.find('.stmp-story-text').val('');
-        return true;
-    }
-
-    windowEl.find('.stmp-story-send').on('click', guarded(async () => {
-        const sent = await sendStoryText();
-        if (!sent) throw new Error('发言内容不能为空。');
-    }));
-    windowEl.find('.stmp-story-send-gen').on('click', guarded(async () => {
-        await sendStoryText();
-        await hostGenerate();
-    }));
     windowEl.find('.stmp-generate').on('click', guarded(hostGenerate));
-    windowEl.find('.stmp-story-text').on('keydown', (event) => {
-        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) windowEl.find('.stmp-story-send').trigger('click');
-    });
 
     // 就绪/跳过是给房主看的信息信号；再点一次取消。
     windowEl.find('.stmp-round-ready').on('click', guarded(async () => {
@@ -875,8 +988,18 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                     : `⚠ 绑定的聊天（${binding.characterName} / ${binding.chatId}）未打开——成员发言暂缓写入，切回或生成前会自动补写。`);
         }
 
-        windowEl.find('.stmp-story-send-gen').toggle(isHost).prop('disabled', snapshot.generating);
         windowEl.find('.stmp-generate').toggle(isHost).prop('disabled', snapshot.generating);
+        if (isHost) {
+            windowEl.find('.stmp-native-hint').text(hostBridge.isBound()
+                ? '直接在酒馆输入框发言：发送会收束本回合并触发 AI 回复；只想让 AI 接管就点"🤖 让 AI 回复"。'
+                : '先点"一键同步"绑定聊天，然后直接用酒馆输入框游玩。');
+        } else {
+            windowEl.find('.stmp-native-hint').text(guestMirrorReady()
+                ? '镜像聊天已连接：直接在酒馆输入框发言；AI 回复由房主生成并实时同步过来。'
+                : importedSaveFileName
+                    ? `切到镜像聊天「${importedSaveFileName}」即可用酒馆输入框游玩。`
+                    : '等待房主"一键同步"（角色卡 + 存档）后即可在原生界面游玩。');
+        }
 
         const sharedCard = snapshot.sharedCard;
         windowEl.find('.stmp-card-host').toggle(isHost);
@@ -1018,21 +1141,24 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         render();
     });
     store.addEventListener('event', (event) => {
-        if ([EventType.ROOM_CARD_UPDATED, EventType.ROOM_CARD_CLEARED].includes(event.detail.type)) scheduleSharedCardImport();
-        if ([EventType.ROOM_CHAT_UPDATED, EventType.ROOM_CHAT_CLEARED].includes(event.detail.type)) scheduleSharedSaveImport();
+        const { type, payload } = event.detail;
+        if ([EventType.ROOM_CARD_UPDATED, EventType.ROOM_CARD_CLEARED].includes(type)) scheduleSharedCardImport();
+        if ([EventType.ROOM_CHAT_UPDATED, EventType.ROOM_CHAT_CLEARED].includes(type)) scheduleSharedSaveImport();
 
-        // 房主：成员的 user 发言按事件顺序写入绑定聊天（extra 标记幂等；
-        // 绑定聊天未打开时先攒着，生成前 catchUp 补写）。
-        if (event.detail.type === EventType.STORY_MESSAGE_PUBLISHED
-            && event.detail.payload?.message?.role === 'user'
-            && store.role === 'host'
-            && hostBridge.isBound()) {
-            const message = event.detail.payload.message;
-            hostBridge.writeUserMessage({
-                messageId: message.messageId,
-                authorName: message.authorName,
-                text: message.text,
-            });
+        if (type === EventType.STORY_MESSAGE_PUBLISHED) applyStoryEventToChat(payload?.message);
+
+        // 客机：把房主的流式生成实时映射成镜像聊天里的气泡。
+        if (store.role === 'guest') {
+            if (type === EventType.GENERATION_STARTED && guestMirrorReady()) {
+                hostBridge.beginStreamBubble(store.snapshot.sharedCard?.characterName || hostBridge.binding?.characterName || '角色');
+            }
+            if (type === EventType.GENERATION_PROGRESSED && typeof payload?.text === 'string') {
+                hostBridge.updateStreamBubble(payload.text);
+            }
+            if (type === EventType.GENERATION_FINISHED && hostBridge.hasStreamBubble()) {
+                // 正常情况下权威 assistant 消息先到、气泡已定稿；走到这里说明生成失败/中止。
+                hostBridge.endStreamBubble(null);
+            }
         }
     });
     store.addEventListener('desync', () => {

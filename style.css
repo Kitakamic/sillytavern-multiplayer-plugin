@@ -172,12 +172,6 @@
     margin-left: auto;
 }
 
-#stmp-window .stmp-story-editor {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-}
-
 #stmp-window .stmp-round-count {
     font-size: 0.85em;
     opacity: 0.75;
