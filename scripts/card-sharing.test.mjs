@@ -53,6 +53,8 @@ assert.deepEqual(shared, {
     characterName: '测试角色',
     bytes: png.size,
     expiresAt: 123456,
+    cardKey: 'dfc4beade01bd86a',
+    contentHash: '629f4275ec7728373546c2565e62bc8bfa5577c1d8aa82a340c0436aa5c4eccf',
 });
 assert.equal(calls[0].url, '/api/characters/export');
 assert.deepEqual(JSON.parse(calls[0].options.body), { format: 'png', avatar_url: 'test.png' });
@@ -69,6 +71,7 @@ const imported = await sharing.importSharedCard({
     roomId: 'room-1',
     assetId: 'asset-1',
     credentials: { clientId: 'guest-1', sessionToken: 'guest-secret' },
+    preservedName: 'stmp_room-1',
 });
 assert.deepEqual(imported, { avatarFileName: 'stmp_room-1.png', characterId: 0 });
 assert.equal(selectedCharacterId, 0);

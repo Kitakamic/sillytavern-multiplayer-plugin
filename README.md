@@ -35,6 +35,8 @@ src/card-sharing.js   Full character-card share/import over the relay asset chan
 src/save-sharing.js   Co-op chat save (jsonl) share/import over the relay asset channel
 src/relay-http.js     Shared asset-channel HTTP helpers (auth headers, hashing)
 src/kick-command.js   room.kick command construction and validation
+src/persona-name.js   Current SillyTavern Persona name normalization
+src/settings.js       Extension defaults and legacy nickname migration
 src/ui.js             Extension UI shell
 src/protocol.js       Shared browser-side protocol constants
 ```

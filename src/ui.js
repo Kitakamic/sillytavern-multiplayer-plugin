@@ -1,5 +1,6 @@
 import { CommandType, EventType, createCommand, createInviteCode, parseInviteCode } from './protocol.js';
 import { createKickCommand } from './kick-command.js';
+import { getCurrentPersonaName, getMessagePersonaName } from './persona-name.js';
 
 const PANEL_ID = 'st-multiplayer-panel';
 const WINDOW_ID = 'stmp-window';
@@ -70,9 +71,12 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     let importedSaveFileName = null;
     let saveImportScheduled = false;
     let syncingAll = false;
+    let advertisedPersonaName = null;
+    let personaSyncPromise = null;
+    let helloPromise = null;
 
-    function helloPayload() {
-        const payload = { displayName: settings.displayName || '玩家' };
+    function helloPayload(displayName = currentPersonaName()) {
+        const payload = { displayName };
         if (settings.credentials?.clientId && settings.credentials?.sessionToken) {
             payload.clientId = settings.credentials.clientId;
             payload.sessionToken = settings.credentials.sessionToken;
@@ -80,19 +84,61 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         return payload;
     }
 
-    /** 身份握手：颁发/恢复凭据；若中继报告我们仍在房间里，则立即 resume 追平。 */
-    async function hello() {
-        const ack = await relay.request(createCommand(CommandType.AUTH_HELLO, helloPayload()));
+    function acceptHello(ack, displayName) {
         settings.credentials = {
             clientId: ack.payload.clientId,
             sessionToken: ack.payload.sessionToken,
         };
-        saveSettings();
+        advertisedPersonaName = displayName;
         helloDone = true;
-        if (ack.payload.room) {
-            await resumeRoom(ack.payload.room);
+        saveSettings();
+    }
+
+    /** 身份握手：颁发/恢复凭据；若中继报告我们仍在房间里，则立即 resume 追平。 */
+    async function hello({ resume = true } = {}) {
+        if (helloPromise) return helloPromise;
+        const pending = (async () => {
+            const displayName = currentPersonaName();
+            const ack = await relay.request(createCommand(CommandType.AUTH_HELLO, helloPayload(displayName)));
+            acceptHello(ack, displayName);
+            if (resume && ack.payload.room) await resumeRoom(ack.payload.room);
+            return ack;
+        })();
+        helloPromise = pending;
+        try {
+            return await pending;
+        } finally {
+            if (helloPromise === pending) helloPromise = null;
         }
-        return ack;
+    }
+
+    /** Persona 改变时复用 auth.hello 刷新 Relay 身份；相同名称不重复上报。 */
+    async function syncPersonaIdentity() {
+        if (relay.state !== 'connected') return currentPersonaName();
+        if (!helloDone) await hello();
+        if (personaSyncPromise) return personaSyncPromise;
+
+        personaSyncPromise = (async () => {
+            while (true) {
+                const displayName = currentPersonaName();
+                if (displayName === advertisedPersonaName) return displayName;
+                const ack = await relay.request(createCommand(CommandType.AUTH_HELLO, helloPayload(displayName)));
+                acceptHello(ack, displayName);
+                if (!ack.payload.room && store.inRoom) store.reset('host_left');
+            }
+        })();
+
+        try {
+            return await personaSyncPromise;
+        } finally {
+            personaSyncPromise = null;
+        }
+    }
+
+    function refreshPersonaIdentity() {
+        void syncPersonaIdentity().catch((error) => {
+            console.warn('[ST Multiplayer] 同步当前 Persona 名称失败：', error);
+        });
     }
 
     /** 入房/建房/重连/缺口共用的恢复路径：resume 应答 = 权威快照 + 增量回放。 */
@@ -425,8 +471,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         return globalThis.SillyTavern?.getContext?.();
     }
 
-    function personaName() {
-        return settings.personaName || settings.displayName || '玩家';
+    function currentPersonaName() {
+        return getCurrentPersonaName(stContext);
     }
 
     /** 客机镜像是否就绪：卡与存档已导入，且镜像聊天正在前台打开。 */
@@ -466,10 +512,12 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (message.extra?.stmpMessageId) return; // 本插件写入的消息，勿回传
         const text = String(message.mes ?? '').trim();
         if (!text) return;
+        const authorName = getMessagePersonaName(message, stContext);
         try {
+            await syncPersonaIdentity();
             const ack = await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
                 text: text.slice(0, 8000),
-                authorName: personaName(),
+                authorName,
                 role: 'user',
             }));
             message.extra = { ...message.extra, stmpMessageId: message.extra?.stmpMessageId ?? ack.payload.messageId };
@@ -645,8 +693,10 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             if (guestMirrorReady()) hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
             pruneDeletedMessages();
             refreshSyncedIdsBaseline();
+            refreshPersonaIdentity();
             render();
         });
+        if (et.SETTINGS_UPDATED) es.on(et.SETTINGS_UPDATED, refreshPersonaIdentity);
     })();
 
     // 生成拦截器：客机在镜像角色上时中止本地生成（消息照发，AI 由房主生成）。
@@ -670,14 +720,6 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                     <input id="st-multiplayer-relay-url" class="text_pole" type="url" placeholder="wss://relay.example.com/ws">
                 </div>
                 <div class="stmp-row">
-                    <label for="st-multiplayer-display-name">昵称</label>
-                    <input id="st-multiplayer-display-name" class="text_pole" type="text" maxlength="32">
-                </div>
-                <div class="stmp-row">
-                    <label for="st-multiplayer-persona-name">角色名</label>
-                    <input id="st-multiplayer-persona-name" class="text_pole" type="text" maxlength="32" placeholder="故事内署名，留空用昵称">
-                </div>
-                <div class="stmp-row">
                     <label class="checkbox_label" for="st-multiplayer-reconnect">
                         <input id="st-multiplayer-reconnect" type="checkbox">
                         <span>断线自动重连</span>
@@ -692,20 +734,10 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     `);
 
     panel.find('#st-multiplayer-relay-url').val(settings.relayUrl);
-    panel.find('#st-multiplayer-display-name').val(settings.displayName);
-    panel.find('#st-multiplayer-persona-name').val(settings.personaName ?? '');
     panel.find('#st-multiplayer-reconnect').prop('checked', settings.reconnect);
 
     panel.find('#st-multiplayer-relay-url').on('input', function () {
         settings.relayUrl = String($(this).val()).trim();
-        saveSettings();
-    });
-    panel.find('#st-multiplayer-display-name').on('input', function () {
-        settings.displayName = String($(this).val()).trim();
-        saveSettings();
-    });
-    panel.find('#st-multiplayer-persona-name').on('input', function () {
-        settings.personaName = String($(this).val()).trim();
         saveSettings();
     });
     panel.find('#st-multiplayer-reconnect').on('change', function () {
@@ -939,6 +971,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             await hostGenerate();
             return;
         }
+        await syncPersonaIdentity();
         await relay.request(createCommand(CommandType.GENERATION_REQUEST));
         toastr.info('已请求推进剧情，等待房主端执行。', '联机酒馆');
     }));
@@ -956,6 +989,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     windowEl.find('.stmp-sidechat-send').on('click', guarded(async () => {
         const text = String(windowEl.find('.stmp-sidechat-text').val()).trim();
         if (!text) return;
+        await syncPersonaIdentity();
         await relay.request(createCommand(CommandType.SIDECHAT_MESSAGE_POST, { text }));
         windowEl.find('.stmp-sidechat-text').val('');
     }));
@@ -1210,17 +1244,17 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         }
     });
     relay.addEventListener('statechange', (event) => {
-        if (event.detail !== 'connected') helloDone = false;
+        if (event.detail !== 'connected') {
+            helloDone = false;
+            advertisedPersonaName = null;
+        }
         render();
     });
     relay.addEventListener('error', () => render());
 
     // resumeProvider：重连成功后先补 hello，再让 relay-client 发 room.resume。
     relay.resumeProvider = async () => {
-        const ack = await relay.request(createCommand(CommandType.AUTH_HELLO, helloPayload()));
-        settings.credentials = { clientId: ack.payload.clientId, sessionToken: ack.payload.sessionToken };
-        saveSettings();
-        helloDone = true;
+        const ack = await hello({ resume: false });
         if (!ack.payload.room) {
             if (store.inRoom) store.reset('host_left');
             return null;

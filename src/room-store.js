@@ -121,7 +121,12 @@ export class RoomStore extends EventTarget {
             case EventType.ROOM_MEMBER_ONLINE:
             case EventType.ROOM_MEMBER_OFFLINE: {
                 const member = state.members.find((m) => m.clientId === payload.clientId);
-                if (member) member.online = event.type === EventType.ROOM_MEMBER_ONLINE;
+                if (member) {
+                    member.online = event.type === EventType.ROOM_MEMBER_ONLINE;
+                    if (event.type === EventType.ROOM_MEMBER_ONLINE && typeof payload.displayName === 'string' && payload.displayName) {
+                        member.displayName = payload.displayName;
+                    }
+                }
                 break;
             }
             case EventType.ROOM_CLOSED: {

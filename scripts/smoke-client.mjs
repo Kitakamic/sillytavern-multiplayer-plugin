@@ -164,11 +164,23 @@ if (guest.store.snapshot.members.length !== 2) fail('guest store does not see bo
 await until(() => host.store.snapshot.members.length === 2, 'host sees guest in member projection');
 pass('guest joins via invite; both member projections converge');
 
+guest.name = '客人新 Persona';
+await guest.hello();
+await until(
+    () => host.store.snapshot.members.some((member) => member.clientId === guest.creds.clientId && member.displayName === guest.name),
+    'host member projection refreshes changed Persona',
+);
+await until(
+    () => guest.store.snapshot.members.some((member) => member.clientId === guest.creds.clientId && member.displayName === guest.name),
+    'guest member projection refreshes own changed Persona',
+);
+pass('same-session auth.hello refreshes Persona in both member projections');
+
 // 直连模式（2026-07-12）：客机直接向共享时间线发言，两侧投影一致。
-await guest.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '我推门而入。', authorName: '小红', role: 'user' }));
+await guest.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '我推门而入。', authorName: guest.name, role: 'user' }));
 await until(() => host.store.snapshot.timeline.length === 1, 'host timeline shows guest message');
 const guestMessage = host.store.snapshot.timeline[0];
-if (guestMessage.authorName !== '小红' || guestMessage.role !== 'user' || !guestMessage.authorClientId) fail('guest story message lacks author identity');
+if (guestMessage.authorName !== guest.name || guestMessage.role !== 'user' || !guestMessage.authorClientId) fail('guest story message lacks current Persona identity');
 pass('guest publishes directly; host projection converges with identity');
 
 // 就绪信号：瞬态事件驱动 ready 投影；AI 回复落地即清空（回合边界）。
@@ -198,6 +210,7 @@ pass('delete converges with deletedIds tombstone');
 
 await guest.client.request(createCommand(CommandType.SIDECHAT_MESSAGE_POST, { text: '这里好玩！' }));
 await until(() => host.store.snapshot.sidechat.length === 1, 'host sidechat projection updated');
+if (host.store.snapshot.sidechat[0].authorDisplayName !== guest.name) fail('sidechat did not use current Persona identity');
 pass('sidechat converges on both sides');
 
 // seq 缺口 → desync 事件 → resume 兜底不产生重复
