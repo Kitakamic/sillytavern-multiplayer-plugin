@@ -403,14 +403,20 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     }
 
     /** 房主收束回合：补写遗漏的成员发言，然后触发一次原生生成（同步由生成观察钩子接管）。 */
+    let hostGenRunning = false;
     async function hostGenerate() {
         if (store.role !== 'host') throw new Error('只有房主可以触发生成。');
         if (!hostBridge.isBound()) throw new Error('请先点"一键同步"绑定当前聊天。');
         if (!hostBridge.isBoundChatOpen()) throw new Error('绑定的聊天未打开，请切回后重试。');
-        if (hostIsGenerating()) throw new Error('AI 正在生成中。');
+        if (hostGenRunning || hostIsGenerating()) throw new Error('AI 正在生成中。');
 
-        hostBridge.catchUp(store.snapshot.timeline);
-        await stContext().generate();
+        hostGenRunning = true;
+        try {
+            hostBridge.catchUp(store.snapshot.timeline);
+            await stContext().generate();
+        } finally {
+            hostGenRunning = false;
+        }
     }
 
     // ---------- 原生聊天同步（P3）：输入走酒馆输入框，故事渲染进真实聊天 ----------
@@ -428,6 +434,12 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         return store.role === 'guest' && Boolean(importedSaveFileName) && hostBridge.isBoundChatOpen();
     }
 
+    /** 原生同步是否就绪（写入/捕获的统一前置条件）。 */
+    function nativeSyncEligible() {
+        if (!store.inRoom) return false;
+        return store.role === 'host' ? hostBridge.isBoundChatOpen() : guestMirrorReady();
+    }
+
     /** 客机切到镜像聊天时自动绑定并补写落下的故事。 */
     function maybeBindGuestMirror() {
         if (store.role !== 'guest' || !importedCardFileName || !importedSaveFileName) return;
@@ -438,6 +450,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         try {
             hostBridge.bindCurrentChat();
             hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
+            pruneDeletedMessages();
+            refreshSyncedIdsBaseline();
             render();
         } catch (error) {
             console.warn('[ST Multiplayer] 绑定镜像聊天失败：', error);
@@ -446,9 +460,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     /** 原生输入框发出的消息 → 发布到房间；ack 后打同步标记（回声事件亦会补标）。 */
     async function onNativeMessageSent(index) {
-        if (!store.inRoom || relay.state !== 'connected') return;
-        const eligible = store.role === 'host' ? hostBridge.isBoundChatOpen() : guestMirrorReady();
-        if (!eligible) return;
+        if (relay.state !== 'connected' || !nativeSyncEligible()) return;
         const message = stContext()?.chat?.[index];
         if (!message?.is_user || message.is_system) return;
         if (message.extra?.stmpMessageId) return; // 本插件写入的消息，勿回传
@@ -463,6 +475,55 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             message.extra = { ...message.extra, stmpMessageId: message.extra?.stmpMessageId ?? ack.payload.messageId };
         } catch (error) {
             toastr.error(`这条发言没有同步到房间（${errorText(error)}），其他成员看不到。`, '联机酒馆');
+        }
+    }
+
+    // ---------- 编辑/删除全同步（共享文档模型，2026-07-12）----------
+
+    /** 删除检测的影子基线：绑定聊天里已同步消息的 ID 集合。 */
+    let syncedIdsBaseline = new Set();
+    let swipePendingIndex = null;
+
+    function refreshSyncedIdsBaseline() {
+        if (!nativeSyncEligible()) return;
+        syncedIdsBaseline = new Set(hostBridge.listSyncedIds());
+    }
+
+    /** 本地文本变化（编辑/swipe/删备选）→ 发布共享文档更新。未同步过或与文档一致时 no-op。 */
+    async function publishLocalTextChange(index) {
+        if (!nativeSyncEligible()) return;
+        const message = stContext()?.chat?.[index];
+        const messageId = message?.extra?.stmpMessageId;
+        if (!messageId) return;
+        const text = String(message.mes ?? '');
+        if (!text.trim()) return;
+        const known = store.snapshot.timeline.find((m) => m.messageId === messageId);
+        if (known && known.text === text) return; // 与共享文档一致
+        try {
+            await relay.request(createCommand(CommandType.STORY_MESSAGE_UPDATE, { messageId, text: text.slice(0, 8000) }));
+        } catch (error) {
+            toastr.error(`修改未同步到房间（${errorText(error)}）。`, '联机酒馆');
+        }
+    }
+
+    /** MESSAGE_DELETED 只报删后长度不报删了谁——用影子基线 diff 找出被删的已同步消息。 */
+    function onMessageDeletedLocally() {
+        if (!nativeSyncEligible()) return;
+        const current = new Set(hostBridge.listSyncedIds());
+        for (const messageId of syncedIdsBaseline) {
+            if (current.has(messageId)) continue;
+            void relay.request(createCommand(CommandType.STORY_MESSAGE_DELETE, { messageId }))
+                .catch((error) => toastr.error(`删除未同步到房间（${errorText(error)}）。`, '联机酒馆'));
+        }
+        syncedIdsBaseline = current;
+    }
+
+    /** 离线期间错过的删除：本地仍带标记、但已被本房间删除过的消息，切回时清理。 */
+    function pruneDeletedMessages() {
+        if (!nativeSyncEligible()) return;
+        const deleted = store.snapshot.deletedIds ?? {};
+        for (const messageId of hostBridge.listSyncedIds()) {
+            if (deleted[messageId]) hostBridge.applyRemoteDelete({ messageId });
         }
     }
 
@@ -492,6 +553,12 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     }
 
     async function onGenerationEnded() {
+        // swipe 触发的重生成结束后，把被 swipe 消息的新文本补发为文档更新。
+        if (swipePendingIndex !== null) {
+            const pendingIndex = swipePendingIndex;
+            swipePendingIndex = null;
+            void publishLocalTextChange(pendingIndex);
+        }
         if (!genWatch) return;
         const { baseline } = genWatch;
         genWatch = null;
@@ -500,11 +567,15 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             const reply = await hostBridge.captureReplySince(baseline);
             if (reply) {
                 if (reply.text.length > 8000) toastr.warning('AI 回复超过 8000 字，共享给成员的版本已截断（房主本地完整）。', '联机酒馆');
-                await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
+                const pubAck = await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
                     text: reply.text.slice(0, 8000),
                     authorName: reply.name || '角色',
                     role: 'assistant',
                 }));
+                // 给房主本地的 AI 消息打同步标记——之后对它的编辑/删除/swipe 才能同步。
+                if (reply.message && !reply.message.extra?.stmpMessageId) {
+                    reply.message.extra = { ...reply.message.extra, stmpMessageId: pubAck.payload.messageId };
+                }
                 ok = true;
             }
         } catch (error) {
@@ -555,14 +626,25 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             return;
         }
         es.on(et.MESSAGE_SENT, (index) => void onNativeMessageSent(index));
+        es.on(et.MESSAGE_EDITED, (index) => void publishLocalTextChange(Number(index)));
+        es.on(et.MESSAGE_SWIPED, (index) => {
+            swipePendingIndex = Number(index);
+            void publishLocalTextChange(Number(index));
+        });
+        if (et.MESSAGE_SWIPE_DELETED) {
+            es.on(et.MESSAGE_SWIPE_DELETED, (payload) => void publishLocalTextChange(Number(payload?.messageId)));
+        }
+        es.on(et.MESSAGE_DELETED, () => onMessageDeletedLocally());
         es.on(et.GENERATION_STARTED, (type, params, dryRun) => onGenerationStarted(type, params, dryRun));
         es.on(et.STREAM_TOKEN_RECEIVED, (text) => onStreamToken(text));
         es.on(et.GENERATION_ENDED, () => void onGenerationEnded());
         es.on(et.CHAT_CHANGED, () => {
             maybeBindGuestMirror();
-            // 切回绑定聊天时补写离开期间落下的故事（幂等）。
+            // 切回绑定聊天时补写离开期间落下的故事、修复文本、清理已删消息（全部幂等）。
             if (store.role === 'host' && hostBridge.isBoundChatOpen()) hostBridge.catchUp(store.snapshot.timeline);
             if (guestMirrorReady()) hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
+            pruneDeletedMessages();
+            refreshSyncedIdsBaseline();
             render();
         });
     })();
@@ -852,7 +934,14 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         toastr.success('邀请码已复制。', '联机酒馆');
     }));
 
-    windowEl.find('.stmp-generate').on('click', guarded(hostGenerate));
+    windowEl.find('.stmp-generate').on('click', guarded(async () => {
+        if (store.role === 'host') {
+            await hostGenerate();
+            return;
+        }
+        await relay.request(createCommand(CommandType.GENERATION_REQUEST));
+        toastr.info('已请求推进剧情，等待房主端执行。', '联机酒馆');
+    }));
 
     // 就绪/跳过是给房主看的信息信号；再点一次取消。
     windowEl.find('.stmp-round-ready').on('click', guarded(async () => {
@@ -988,7 +1077,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                     : `⚠ 绑定的聊天（${binding.characterName} / ${binding.chatId}）未打开——成员发言暂缓写入，切回或生成前会自动补写。`);
         }
 
-        windowEl.find('.stmp-generate').toggle(isHost).prop('disabled', snapshot.generating);
+        windowEl.find('.stmp-generate')
+            .show()
+            .prop('disabled', snapshot.generating)
+            .text(isHost ? '🤖 让 AI 回复' : '🤖 请求 AI 回复');
+        refreshSyncedIdsBaseline();
         if (isHost) {
             windowEl.find('.stmp-native-hint').text(hostBridge.isBound()
                 ? '直接在酒馆输入框发言：发送会收束本回合并触发 AI 回复；只想让 AI 接管就点"🤖 让 AI 回复"。'
@@ -1146,6 +1239,23 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if ([EventType.ROOM_CHAT_UPDATED, EventType.ROOM_CHAT_CLEARED].includes(type)) scheduleSharedSaveImport();
 
         if (type === EventType.STORY_MESSAGE_PUBLISHED) applyStoryEventToChat(payload?.message);
+
+        // 共享文档编辑：远端的修改/删除落到本地聊天（自己发出的回声因文本一致而 no-op）。
+        if (type === EventType.STORY_MESSAGE_UPDATED && nativeSyncEligible()) {
+            hostBridge.applyRemoteUpdate({ messageId: payload.messageId, text: payload.text });
+        }
+        if (type === EventType.STORY_MESSAGE_DELETED && nativeSyncEligible()) {
+            hostBridge.applyRemoteDelete({ messageId: payload.messageId });
+        }
+
+        // 生成请求（方案 a）：房主端代为执行。
+        if (type === EventType.GENERATION_REQUESTED && store.role === 'host' && payload?.clientId !== store.selfClientId) {
+            const who = payload?.displayName ?? '成员';
+            hostGenerate().then(
+                () => toastr.info(`${who} 请求推进剧情，已触发生成。`, '联机酒馆'),
+                (error) => toastr.warning(`${who} 请求生成，但无法执行：${errorText(error)}`, '联机酒馆'),
+            );
+        }
 
         // 客机：把房主的流式生成实时映射成镜像聊天里的气泡。
         if (store.role === 'guest') {

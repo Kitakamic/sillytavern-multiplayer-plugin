@@ -182,6 +182,20 @@ await until(() => Object.keys(host.store.snapshot.ready).length === 0, 'host rea
 await until(() => Object.keys(guest.store.snapshot.ready).length === 0, 'guest ready map cleared');
 pass('assistant reply lands and clears the round-ready map');
 
+// 共享文档编辑（2026-07-12）：任何成员的修改/删除双向收敛，删除留痕于 deletedIds。
+const editTargetId = guest.store.snapshot.timeline[0].messageId;
+await host.client.request(createCommand(CommandType.STORY_MESSAGE_UPDATE, { messageId: editTargetId, text: '我推门而入。（润色）' }));
+await until(() => guest.store.snapshot.timeline[0]?.text === '我推门而入。（润色）', 'guest sees edited text');
+if (guest.store.snapshot.timeline[0].edited !== true) fail('edited flag missing after update');
+pass('edit converges across projections');
+
+const tempPub = await guest.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '（临时消息，测试删除）', authorName: '小红', role: 'user' }));
+await until(() => host.store.snapshot.timeline.length === 3, 'temp message reaches host');
+await guest.client.request(createCommand(CommandType.STORY_MESSAGE_DELETE, { messageId: tempPub.payload.messageId }));
+await until(() => host.store.snapshot.timeline.length === 2, 'host timeline drops deleted message');
+if (host.store.snapshot.deletedIds[tempPub.payload.messageId] !== true) fail('deletedIds not tracked');
+pass('delete converges with deletedIds tombstone');
+
 await guest.client.request(createCommand(CommandType.SIDECHAT_MESSAGE_POST, { text: '这里好玩！' }));
 await until(() => host.store.snapshot.sidechat.length === 1, 'host sidechat projection updated');
 pass('sidechat converges on both sides');

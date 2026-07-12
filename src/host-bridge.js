@@ -119,12 +119,16 @@ export function createHostBridge(contextProvider) {
         return false;
     }
 
-    /** 补写：把时间线里还没进聊天的消息按序写入（幂等）。 */
+    /** 补写：把时间线里还没进聊天的消息按序写入；已在聊天里的按时间线文本修复（幂等）。 */
     function catchUp(timeline, { includeAssistant = false } = {}) {
         if (!isBoundChatOpen()) return 0;
         let written = 0;
         for (const entry of timeline) {
             if (entry.role !== 'user' && !(includeAssistant && entry.role === 'assistant')) continue;
+            if (hasMessage(entry.messageId)) {
+                applyRemoteUpdate({ messageId: entry.messageId, text: entry.text });
+                continue;
+            }
             const result = writeStoryMessage({
                 messageId: entry.messageId,
                 authorName: entry.authorName,
@@ -136,6 +140,45 @@ export function createHostBridge(contextProvider) {
         return written;
     }
 
+    /** 当前绑定聊天里已同步消息的 ID 列表（删除检测的影子基线）。 */
+    function listSyncedIds() {
+        if (!isBoundChatOpen()) return [];
+        const chat = getContext().chat ?? [];
+        return chat.filter((m) => m?.extra?.stmpMessageId).map((m) => m.extra.stmpMessageId);
+    }
+
+    /** 应用远端编辑：按 ID 定位、覆盖文本并重绘该块。文本相同或找不到时 no-op。 */
+    function applyRemoteUpdate({ messageId, text }) {
+        if (!isBoundChatOpen()) return false;
+        const context = getContext();
+        const chat = context.chat ?? [];
+        const index = chat.findIndex((m) => m?.extra?.stmpMessageId === messageId);
+        if (index < 0) return false;
+        if (chat[index].mes === text) return false;
+        chat[index].mes = text;
+        context.updateMessageBlock?.(index, chat[index]);
+        void Promise.resolve(context.saveChat()).catch(() => { /* 尽力而为 */ });
+        return true;
+    }
+
+    /** 应用远端删除：按 ID 定位、移除并整页重绘。找不到时 no-op。 */
+    function applyRemoteDelete({ messageId }) {
+        if (!isBoundChatOpen()) return false;
+        const context = getContext();
+        const chat = context.chat ?? [];
+        const index = chat.findIndex((m) => m?.extra?.stmpMessageId === messageId);
+        if (index < 0) return false;
+        chat.splice(index, 1);
+        try {
+            context.clearChat?.();
+            context.printMessages?.();
+        } catch (error) {
+            console.warn('[ST Multiplayer] 删除消息后的重绘失败：', error);
+        }
+        void Promise.resolve(context.saveChat()).catch(() => { /* 尽力而为 */ });
+        return true;
+    }
+
     /** 生成结束后捕获 baseline 之后的最新 AI 消息（消息定稿与事件之间有窗口，轮询兜底）。 */
     async function captureReplySince(baseline) {
         const deadline = Date.now() + REPLY_SETTLE_TIMEOUT_MS;
@@ -144,7 +187,7 @@ export function createHostBridge(contextProvider) {
             for (let i = chat.length - 1; i >= baseline; i--) {
                 const message = chat[i];
                 if (message && !message.is_user && !message.is_system && typeof message.mes === 'string' && message.mes.trim()) {
-                    return { text: message.mes, name: message.name };
+                    return { text: message.mes, name: message.name, message };
                 }
             }
             if (Date.now() >= deadline) return null;
@@ -237,6 +280,9 @@ export function createHostBridge(contextProvider) {
         writeStoryMessage,
         tagLocalMessage,
         catchUp,
+        listSyncedIds,
+        applyRemoteUpdate,
+        applyRemoteDelete,
         captureReplySince,
         hasStreamBubble,
         beginStreamBubble,

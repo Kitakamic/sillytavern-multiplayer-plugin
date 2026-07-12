@@ -20,6 +20,7 @@
 以现有 `src/protocol.js` 的命名风格为准，relay 的 `src/core/protocol.ts` 必须与本表逐字一致。任何一侧改动命令名，必须同一次提交更新两边和本表。
 
 > **2026-07-12 改版：删除审核模式。** 面向亲密朋友局，成员经 `story.message.publish` 直接向共享时间线发言（relay 的 seq 是全序仲裁），提案命令族（`proposal.*`）整体移除（实现存档见两仓库 git 历史）。新增 `round.ready` 回合就绪信号。
+> **2026-07-12 共享文档改版：** 聊天记录是全房共享的一份文档，酒馆只是编辑它的前端——新增 `story.message.update/delete`（全员可修改/删除任何故事消息，消息粒度 LWW）与 `generation.request`（方案 a：成员请求推进剧情，房主端代为执行；生成锁的对等模式 b 留作 V2 备选）。
 
 | 命令 | 发起方 | 说明 |
 |---|---|---|
@@ -35,8 +36,11 @@
 | `room.chat.update` | 房主 | 发布已上传的联机存档（当前聊天 jsonl，kind=chat 资产），成员自动导入续局 |
 | `room.chat.clear` | 房主 | 停止共享并立即删除对应联机存档资产 |
 | `story.message.publish` | 所有成员 | 直接向共享时间线发言（`role: 'user'`）；`role: 'assistant'`（AI 回复）仅房主可发 |
+| `story.message.update` | 所有成员 | 共享文档编辑：修改任何故事消息的文本（消息粒度按 seq 最后写入者胜） |
+| `story.message.delete` | 所有成员 | 共享文档编辑：删除任何故事消息 |
 | `sidechat.message.post` | 所有人 | 副聊天发言（不进故事、不进 prompt，**新增**） |
 | `round.ready` | 所有成员 | 回合就绪信号（`state: 'ready' \| 'skip' \| 'clear'`），纯信息性，帮助房主决定何时触发生成 |
+| `generation.request` | 所有成员 | 请求推进剧情（方案 a）：房主客户端收到广播后代为触发生成；生成中拒绝（RATE_LIMITED） |
 | `generation.start` / `generation.progress` / `generation.finish` | 房主 | AI 生成状态广播；progress 携带节流的流式全文快照（`text` ≤16000 字符，护 WS 64KB 帧上限） |
 
 ### 2.1 事件词汇表（中继 → 客户端，M1 起）
@@ -55,8 +59,11 @@
 | `room.chat.updated` | `{ assetId, chatName, messageCount, bytes, expiresAt, sharedAt, saveKey?, contentHash? }` | 联机存档（jsonl）已更新；`saveKey` 标识“房主的这一份聊天”（客机覆盖写同一本地聊天文件），`contentHash` 未变则跳过导入 |
 | `room.chat.cleared` | `{ assetId }` | 联机存档停止共享；对应资产立即不可下载 |
 | `story.message.published` | `{ message: {messageId, authorClientId, authorName, role: 'user'\|'assistant', text, publishedAt} }` | 成员的直连发言或房主发布的 AI 回复；`authorClientId` 标识发言人，`authorName` 为其角色名。assistant 消息落地即回合边界（客户端据此清空就绪状态） |
+| `story.message.updated` | `{ messageId, text, editorClientId }` | 共享文档编辑：消息文本被修改（持久事件，resume 可重放；客户端按 ID 定位本地消息覆盖文本） |
+| `story.message.deleted` | `{ messageId, removerClientId }` | 共享文档编辑：消息被删除（持久事件；客户端删除本地对应消息并记入 deletedIds 墓碑，离线错过也能在切回时清理） |
 | `sidechat.message.posted` | `{ message: {messageId, authorClientId, authorDisplayName, text, postedAt} }` | 副聊天发言（文本 ≤2000 字符；故事文本 ≤8000） |
 | `round.ready.changed` | `{ clientId, state: 'ready'\|'skip'\|'clear' }` | **瞬态**回合就绪信号（无 seq、不入日志）；重连丢失无后果 |
+| `generation.requested` | `{ clientId, displayName }` | **瞬态**生成请求广播；房主客户端收到后代为触发生成 |
 | `generation.started` / `generation.progressed` / `generation.finished` | `{}` / `{ charCount?, text? }` / `{ ok }` | 瞬态生成状态广播（无 seq）；`text` 为节流的流式全文快照，客机渲染实时气泡 |
 
 错误帧携带机器可读的 `payload.code`（两侧 protocol 的 `ErrorCode`，如 `INVITE_INVALID`、`FORBIDDEN`），UI 据此映射中文文案；`payload.message` 为英文日志文案，不面向用户展示。

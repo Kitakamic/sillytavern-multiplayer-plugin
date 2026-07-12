@@ -4,7 +4,9 @@ function initialState() {
     return {
         room: null, // { roomId, role, selfClientId }
         members: [], // [{ clientId, displayName, role, joinedAt, online }]
-        timeline: [], // [{ messageId, authorClientId, authorName, role, text, publishedAt, seq }]
+        timeline: [], // [{ messageId, authorClientId, authorName, role, text, publishedAt, seq, edited? }]
+        /** 本房间内被删除过的故事消息 ID → true（客户端离线错过删除事件时据此清理本地聊天）。 */
+        deletedIds: {},
         sidechat: [], // [{ messageId, authorClientId, authorDisplayName, text, postedAt }]
         sharedCard: null, // { assetId, characterName, bytes, expiresAt, sharedAt, cardKey?, contentHash? }
         sharedSave: null, // { assetId, chatName, messageCount, bytes, expiresAt, sharedAt, saveKey?, contentHash? }
@@ -159,6 +161,18 @@ export class RoomStore extends EventTarget {
                 state.timeline.push({ ...payload.message, seq: event.seq });
                 // AI 回复落地 = 回合结束，清空全员就绪状态。
                 if (payload.message?.role === 'assistant') state.ready = {};
+                break;
+            case EventType.STORY_MESSAGE_UPDATED: {
+                const target = state.timeline.find((m) => m.messageId === payload.messageId);
+                if (target) {
+                    target.text = payload.text;
+                    target.edited = true;
+                }
+                break;
+            }
+            case EventType.STORY_MESSAGE_DELETED:
+                state.timeline = state.timeline.filter((m) => m.messageId !== payload.messageId);
+                state.deletedIds[payload.messageId] = true;
                 break;
             case EventType.SIDECHAT_MESSAGE_POSTED:
                 state.sidechat.push({ ...payload.message });
