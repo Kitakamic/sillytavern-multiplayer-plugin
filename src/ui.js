@@ -661,6 +661,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     }
 
     /** 原生输入框发出的消息 → 发布到房间；ack 后打同步标记（回声事件亦会补标）。 */
+    let lastUserPublish = Promise.resolve();
     async function onNativeMessageSent(index) {
         if (relay.state !== 'connected' || !nativeSyncEligible()) return;
         const message = stContext()?.chat?.[index];
@@ -669,7 +670,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         const text = String(message.mes ?? '').trim();
         if (!text) return;
         const authorName = getMessagePersonaName(message, stContext);
-        try {
+        const publishTask = (async () => {
             await syncPersonaIdentity();
             const ack = await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
                 text: text.slice(0, 8000),
@@ -677,6 +678,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                 role: 'user',
             }));
             message.extra = { ...message.extra, stmpMessageId: message.extra?.stmpMessageId ?? ack.payload.messageId };
+        })();
+        // generation.start 的顺序栅栏只等它 settle：发布失败也不能卡住生成广播。
+        lastUserPublish = publishTask.then(() => {}, () => {});
+        try {
+            await publishTask;
         } catch (error) {
             toastr.error(`这条发言没有同步到房间（${errorText(error)}），其他成员看不到。`, '联机酒馆');
         }
@@ -734,6 +740,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     // 房主端生成观察：原生触发的生成（含输入框发送后的自动生成）也全程转发。
     let genWatch = null;
     let lastStreamSent = 0;
+    let generationStartSent = Promise.resolve();
 
     function onGenerationStarted(type, _params, dryRun) {
         // 只转发普通生成；swipe/regenerate/continue 是对已有消息的修改，
@@ -742,7 +749,12 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (store.role !== 'host' || !store.inRoom || !hostBridge.isBoundChatOpen()) return;
         genWatch = { baseline: stContext().chat.length };
         lastStreamSent = 0;
-        void relay.request(createCommand(CommandType.GENERATION_START)).catch(() => { /* 状态广播尽力而为 */ });
+        // 发言发布与 generation.start 并发时后者常抢先到达中继：客机先建流式
+        // 气泡，刚发的那句反而排到气泡下面（直到定稿才复位）。先等本回合的
+        // 发言发布 settle 再宣布生成开始，保证中继侧顺序 = 发言 → 生成。
+        generationStartSent = lastUserPublish
+            .then(() => relay.request(createCommand(CommandType.GENERATION_START)))
+            .then(() => {}, () => { /* 状态广播尽力而为 */ });
     }
 
     function onStreamToken(text) {
@@ -785,7 +797,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         } catch (error) {
             toastr.error(`AI 回复未能同步到房间：${errorText(error)}`, '联机酒馆');
         } finally {
-            void relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })).catch(() => { /* 尽力而为 */ });
+            // finish 沿用 start 的栅栏：万一 start 还在等发言发布，抢先发出的
+            // finish 会让房间的 generating 标志卡到下一回合才被复位。
+            void generationStartSent
+                .then(() => relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })))
+                .catch(() => { /* 尽力而为 */ });
         }
     }
 
