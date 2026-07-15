@@ -1,5 +1,13 @@
 import { relayHttpOrigin, requireSession, responseError, sha256Hex } from './relay-http.js';
 
+function assertCurrentImport(shouldContinue) {
+    if (typeof shouldContinue === 'function' && !shouldContinue()) {
+        const error = new Error('共享角色卡导入已过期。');
+        error.code = 'STALE_IMPORT';
+        throw error;
+    }
+}
+
 /**
  * 完整角色卡共享模块。UI 只需要知道“共享当前卡”和“导入共享卡”；
  * SillyTavern 导出/导入表单、Relay HTTP 地址和房间凭据都封装在这里。
@@ -58,7 +66,7 @@ export class CharacterCardSharing {
      * 下载并导入共享卡。preservedName（不带 .png）由调用方决定：
      * 复用旧文件名即为覆盖更新，聊天记录保留。
      */
-    async importSharedCard({ relayUrl, roomId, assetId, credentials, preservedName }) {
+    async importSharedCard({ relayUrl, roomId, assetId, credentials, preservedName, shouldContinue = null }) {
         const context = this.#context();
         const download = await this.fetch(`${relayHttpOrigin(relayUrl)}/rooms/${encodeURIComponent(roomId)}/assets/${encodeURIComponent(assetId)}`, {
             headers: requireSession(credentials),
@@ -67,6 +75,7 @@ export class CharacterCardSharing {
         if (!download.ok) throw await responseError(download, '下载完整角色卡失败。');
 
         const card = new Blob([await download.arrayBuffer()], { type: 'image/png' });
+        assertCurrentImport(shouldContinue);
         const form = new FormData();
         form.append('avatar', card, `${preservedName}.png`);
         form.append('file_type', 'png');
@@ -83,10 +92,12 @@ export class CharacterCardSharing {
         const result = await imported.json();
         if (result.error || typeof result.file_name !== 'string') throw new Error('角色卡内容无效，导入失败。');
 
+        assertCurrentImport(shouldContinue);
         await context.getCharacters();
         const avatarFileName = `${result.file_name}.png`;
         const characterId = context.characters.findIndex((character) => character.avatar === avatarFileName);
         if (characterId < 0) throw new Error('角色卡已导入，但未能在角色列表中找到。');
+        assertCurrentImport(shouldContinue);
         await context.selectCharacterById(characterId);
         return { avatarFileName, characterId };
     }
@@ -98,10 +109,11 @@ export class CharacterCardSharing {
     }
 
     /** 选中指定 avatar 文件名的角色；不存在时返回 false。 */
-    async selectByAvatar(avatarFileName) {
+    async selectByAvatar(avatarFileName, shouldContinue = null) {
         const context = this.#context();
         const characterId = (context.characters ?? []).findIndex((character) => character.avatar === avatarFileName);
         if (characterId < 0) return false;
+        assertCurrentImport(shouldContinue);
         await context.selectCharacterById(characterId);
         return true;
     }

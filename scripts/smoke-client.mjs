@@ -162,6 +162,26 @@ class Player {
             if (this.resumeBarrier.active) this.resumeBarrier.end();
         }
     }
+
+    /** Mirrors ui.js: leave clears the local projection, then a later invite join starts a fresh resume window. */
+    async leave() {
+        this.resumeBarrier.clear();
+        await this.client.request(createCommand(CommandType.ROOM_LEAVE));
+        this.store.reset('left');
+    }
+
+    /** Mirrors ui.js joinRoom after ensureSession has already completed. */
+    async join(roomId, token) {
+        if (this.store.inRoom) throw new Error('test player is already in a room');
+        this.resumeBarrier.begin();
+        try {
+            await this.client.request(createCommand(CommandType.ROOM_JOIN, { roomId, token }));
+            await this.resume();
+        } catch (error) {
+            this.resumeBarrier.clear();
+            throw error;
+        }
+    }
 }
 
 const creatorKey = loadCreatorKey();
@@ -264,6 +284,24 @@ await until(() => guest.store.snapshot.timeline.length === 4, 'guest timeline ca
 const seqs = guest.store.snapshot.timeline.map((m) => m.seq);
 if (new Set(seqs).size !== seqs.length) fail('timeline contains duplicate seq');
 pass('offline progress recovered via hello+resume (no gap, no dup)');
+
+// 同一身份退出后再次使用同一邀请码进入：完整 resume 回放会同时包含
+// 旧 room.member.left 与新的 room.member.joined，客户端仍必须留在房间投影中。
+await guest.leave();
+await until(
+    () => !host.store.snapshot.members.some((member) => member.clientId === guest.creds.clientId),
+    'host sees guest leave before rejoin',
+);
+if (guest.store.inRoom) fail('guest store did not clear after leave');
+await guest.join(roomId, parsedInvite.token);
+await until(() => guest.store.inRoom, 'guest store reseeds after rejoin');
+await until(
+    () => host.store.snapshot.members.some((member) => member.clientId === guest.creds.clientId),
+    'host sees guest rejoin',
+);
+if (guest.store.snapshot.closedReason !== null) fail(`guest closed during rejoin: ${guest.store.snapshot.closedReason}`);
+if (guest.store.snapshot.timeline.length !== 4) fail('guest rejoin replay did not retain the shared timeline');
+pass('guest leave → same-invite rejoin keeps the client room projection');
 
 // 完整卡共享：房主上传资产并发布，客人投影收到；停止共享后投影清空。
 const assetBase = new URL(wsUrl);

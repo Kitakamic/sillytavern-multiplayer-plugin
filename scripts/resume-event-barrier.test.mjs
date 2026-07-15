@@ -29,6 +29,37 @@ function persisted(seq, text = `message-${seq}`) {
     };
 }
 
+function memberJoined(seq, clientId, { role = 'guest', joinedAt = seq } = {}) {
+    return {
+        v: 1,
+        kind: 'event',
+        type: EventType.ROOM_MEMBER_JOINED,
+        eventId: `member-joined-${clientId}-${seq}`,
+        roomId: ROOM_ID,
+        seq,
+        payload: {
+            member: {
+                clientId,
+                displayName: clientId === SELF_ID ? '我' : '其他玩家',
+                role,
+                joinedAt,
+            },
+        },
+    };
+}
+
+function memberLeft(seq, clientId, reason = 'left') {
+    return {
+        v: 1,
+        kind: 'event',
+        type: EventType.ROOM_MEMBER_LEFT,
+        eventId: `member-left-${clientId}-${seq}`,
+        roomId: ROOM_ID,
+        seq,
+        payload: { clientId, reason },
+    };
+}
+
 function transient(type, payload = {}) {
     return {
         v: 1,
@@ -128,6 +159,69 @@ async function until(predicate, label, timeoutMs = 3000) {
     assert.deepEqual(result, { needsFollowUp: false, closed: false });
     barrier.end();
     console.log('PASS pre-seed live event survives initial join resume');
+}
+
+// 退出后用同一身份重新加入同一房间：全量 replay 含有上一届成员资格的
+// room.member.left。它已被新的 room.member.joined 覆盖，不能把当前投影再次清空。
+{
+    const { store, barrier } = createHarness();
+    const hostJoined = memberJoined(1, 'client-other', { role: 'host', joinedAt: 1 });
+    const firstJoin = memberJoined(2, SELF_ID, { joinedAt: 2 });
+    const oldLeave = memberLeft(4, SELF_ID);
+    const currentJoin = memberJoined(5, SELF_ID, { joinedAt: 5 });
+    const payload = {
+        ...resumePayload({
+            events: [hostJoined, firstJoin, persisted(3), oldLeave, currentJoin],
+            lastSeq: 5,
+        }),
+        members: [
+            { clientId: SELF_ID, displayName: '我', role: 'guest', joinedAt: 5, online: true },
+            { clientId: 'client-other', displayName: '其他玩家', role: 'host', joinedAt: 1, online: true },
+        ],
+    };
+
+    barrier.begin();
+    // 模拟 room.join ack 与 member.joined fanout 交错：即时帧可以先到。
+    barrier.route(currentJoin);
+    const result = barrier.commit(payload);
+
+    assert.deepEqual(result, { needsFollowUp: false, closed: false });
+    assert.equal(store.inRoom, true, 'the current membership remains rendered after replay');
+    assert.equal(store.lastAppliedSeq, 5);
+    assert.deepEqual(store.snapshot.timeline.map((message) => message.messageId), ['message-3']);
+    barrier.end();
+    console.log('PASS rejoin replay ignores a superseded self-leave event');
+}
+
+// 过滤只作用于旧 membership：当前 self-joined 之后抵达的真实踢人仍是终态。
+{
+    const { store, barrier } = createHarness();
+    const hostJoined = memberJoined(1, 'client-other', { role: 'host', joinedAt: 1 });
+    const firstJoin = memberJoined(2, SELF_ID, { joinedAt: 2 });
+    const oldLeave = memberLeft(4, SELF_ID);
+    const currentJoin = memberJoined(5, SELF_ID, { joinedAt: 5 });
+    const currentKick = memberLeft(6, SELF_ID, 'kicked');
+    const payload = {
+        ...resumePayload({
+            events: [hostJoined, firstJoin, persisted(3), oldLeave, currentJoin],
+            lastSeq: 5,
+        }),
+        members: [
+            { clientId: SELF_ID, displayName: '我', role: 'guest', joinedAt: 5, online: true },
+            { clientId: 'client-other', displayName: '其他玩家', role: 'host', joinedAt: 1, online: true },
+        ],
+    };
+
+    barrier.begin();
+    // room.resume 的权威快照仍是当前 membership；随后抵达的实时 kick 必须
+    // 继续生效，不能被“旧 self-left”过滤规则吞掉。
+    barrier.route(currentKick);
+    const result = barrier.commit(payload);
+
+    assert.deepEqual(result, { needsFollowUp: false, closed: true });
+    assert.equal(store.inRoom, false);
+    assert.equal(store.snapshot.closedReason, 'kicked');
+    console.log('PASS current self-kick after rejoin is not suppressed');
 }
 
 // 自动重连：第二次 resume 应把第一次看到的未来 seq 与缺失 seq 一起连续应用。

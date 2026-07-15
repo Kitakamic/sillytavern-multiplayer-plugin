@@ -99,6 +99,28 @@ export class RoomStore extends EventTarget {
         return true;
     }
 
+    /**
+     * 将一个已被控制层判定为过时的持久事件仅推进序号、不执行 reducer。
+     *
+     * 典型场景是同一身份离房再入同一房间：完整 room.resume 回放中，
+     * 旧成员资格的 room.member.left 已被后续 room.member.joined 覆盖；
+     * 若仍按普通事件执行，会错误清掉当前刚恢复的房间投影。
+     */
+    advancePast(event) {
+        const state = this.#state;
+        if (!state.room || event.roomId !== state.room.roomId) return true;
+        if (typeof event.seq !== 'number') return true;
+        if (event.seq <= state.lastAppliedSeq) return true;
+        if (event.seq > state.lastAppliedSeq + 1) {
+            this.dispatchEvent(new CustomEvent('desync', {
+                detail: { expectedSeq: state.lastAppliedSeq + 1, gotSeq: event.seq },
+            }));
+            return false;
+        }
+        state.lastAppliedSeq = event.seq;
+        return true;
+    }
+
     #reduce(event) {
         const state = this.#state;
         const payload = event.payload ?? {};

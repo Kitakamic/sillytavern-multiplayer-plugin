@@ -61,8 +61,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     // ---------- 控制层状态 ----------
     let helloDone = false;
     let expectHello = false;
+    /** { generation, followUpRequested, promise }；旧生命周期的 ack 绝不能复用到新入房。 */
     let resumeInFlight = null;
-    let resumeFollowUpRequested = false;
+    let roomLifecycleGeneration = 0;
+    let automaticResumeGeneration = null;
+    let observedInRoom = store.inRoom;
     let lastInviteCode = '';
     let importingCardAssetId = null;
     let importedCardAssetId = null;
@@ -72,6 +75,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     let importedSaveAssetId = null;
     let importedSaveFileName = null;
     let saveImportScheduled = false;
+    /** 离房后仍可能完成旧房间的 HTTP 导入；用 epoch 阻止其覆盖新房间的镜像状态。 */
+    let mirrorImportGeneration = 0;
     let syncingAll = false;
     let advertisedPersonaName = null;
     let personaSyncPromise = null;
@@ -162,9 +167,20 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     const resumeBarrier = new ResumeEventBarrier({ store, applySnapshot: applyResumeSnapshot });
 
+    /**
+     * A room leave/reset starts a new lifecycle.  WebSocket requests cannot be
+     * cancelled, so stale room.resume acks are fenced by this monotonically
+     * increasing generation instead of being allowed to seed a later join.
+     */
+    function invalidateRoomLifecycle() {
+        roomLifecycleGeneration += 1;
+        resumeBarrier.clear();
+        return roomLifecycleGeneration;
+    }
+
     function resetMissingRemoteRoom(ack) {
         if (ack?.payload?.room) return false;
-        resumeBarrier.clear();
+        invalidateRoomLifecycle();
         if (!store.inRoom) return false;
         store.reset('host_left');
         return true;
@@ -172,37 +188,48 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     /** 入房/建房/重连/缺口共用的恢复路径：ack 与即时事件会在 barrier 内连续合并。 */
     async function resumeRoom(roomHint = null) {
+        const generation = roomLifecycleGeneration;
         resumeBarrier.begin();
-        if (resumeInFlight) {
-            resumeFollowUpRequested = true;
-            return resumeInFlight;
+        if (resumeInFlight?.generation === generation) {
+            resumeInFlight.followUpRequested = true;
+            return resumeInFlight.promise;
         }
 
-        let pending;
-        pending = (async () => {
+        const flight = { generation, followUpRequested: false, promise: null };
+        const staleResult = () => ({ needsFollowUp: false, closed: true, stale: true });
+        const pending = (async () => {
             let hint = roomHint;
             while (true) {
-                resumeFollowUpRequested = false;
+                flight.followUpRequested = false;
                 const ack = await relay.request(createCommand(CommandType.ROOM_RESUME, {
                     lastAppliedSeq: store.inRoom ? store.lastAppliedSeq : 0,
                 }));
+                // leave/reset/rejoin happened while the old request was on the
+                // wire.  Never commit that old snapshot into the new lifecycle.
+                if (generation !== roomLifecycleGeneration) return staleResult();
                 const result = resumeBarrier.commit(ack.payload, hint);
                 hint = null;
-                if (result.closed || (!result.needsFollowUp && !resumeFollowUpRequested)) return result;
+                // A terminal event can itself invalidate the lifecycle during
+                // commit; retain its terminal result rather than treating it as
+                // a transport-stale acknowledgement.
+                if (result.closed) return result;
+                if (generation !== roomLifecycleGeneration) return staleResult();
+                if (!result.needsFollowUp && !flight.followUpRequested) return result;
             }
         })();
-        resumeInFlight = pending;
+        flight.promise = pending;
+        resumeInFlight = flight;
 
         try {
             return await pending;
         } catch (error) {
+            if (generation !== roomLifecycleGeneration) return staleResult();
             if (error?.code === 'NOT_IN_ROOM') resetMissingRemoteRoom({ payload: { room: null } });
             throw error;
         } finally {
-            if (resumeInFlight === pending) {
+            if (resumeInFlight === flight) {
                 resumeInFlight = null;
-                resumeFollowUpRequested = false;
-                if (resumeBarrier.active) resumeBarrier.end();
+                if (generation === roomLifecycleGeneration && resumeBarrier.active) resumeBarrier.end();
             }
         }
     }
@@ -258,6 +285,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         saveSettings();
         await ensureSession(invite.relayUrl);
         if (store.inRoom) throw Object.assign(new Error('已在房间中。'), { code: 'ALREADY_IN_ROOM' });
+        // 新邀请码入房是独立生命周期，不可借用离房前尚未返回的 room.resume。
+        invalidateRoomLifecycle();
         // room.member.joined 可能在 join ack 前抵达，先打开恢复栅栏。
         resumeBarrier.begin();
         try {
@@ -275,6 +304,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (!settings.relayUrl) throw new Error('请先在扩展设置中填写 Relay 地址。');
         await ensureSession(settings.relayUrl);
         if (store.inRoom) throw Object.assign(new Error('已在房间中。'), { code: 'ALREADY_IN_ROOM' });
+        invalidateRoomLifecycle();
         // room.member.joined 与 create ack 的顺序不承诺，必须同样缓冲。
         resumeBarrier.begin();
         try {
@@ -293,7 +323,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     }
 
     async function leaveRoom() {
-        resumeBarrier.clear();
+        invalidateRoomLifecycle();
+        resetGuestMirrorLifecycle();
         await relay.request(createCommand(CommandType.ROOM_LEAVE));
         lastInviteCode = '';
         store.reset('left');
@@ -341,11 +372,48 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         saveSettings();
     }
 
+    /**
+     * Imported asset IDs are room-session state, unlike the persistent
+     * content-hash/file-name caches in settings.  Clearing them makes a
+     * leave→rejoin re-evaluate the current room snapshot; the epoch prevents
+     * an old room's slow HTTP import from restoring stale IDs afterwards.
+     */
+    function resetGuestMirrorLifecycle() {
+        mirrorImportGeneration += 1;
+        importingCardAssetId = null;
+        importedCardAssetId = null;
+        importedCardFileName = null;
+        cardImportScheduled = false;
+        importingSaveAssetId = null;
+        importedSaveAssetId = null;
+        importedSaveFileName = null;
+        saveImportScheduled = false;
+    }
+
+    function isCurrentGuestMirrorGeneration(generation, roomId) {
+        return generation === mirrorImportGeneration
+            && store.inRoom
+            && store.role === 'guest'
+            && store.snapshot.room?.roomId === roomId;
+    }
+
+    function isCurrentGuestMirrorImport(generation, roomId, assetId, kind) {
+        if (!isCurrentGuestMirrorGeneration(generation, roomId)) return false;
+        const snapshot = store.snapshot;
+        return kind === 'card'
+            ? snapshot.sharedCard?.assetId === assetId
+            : snapshot.sharedSave?.assetId === assetId;
+    }
+
     async function importSharedCard(card, force = false) {
         if (!card || store.role !== 'guest') return;
         if (!force && importedCardAssetId === card.assetId) return;
         if (importingCardAssetId) return;
 
+        const generation = mirrorImportGeneration;
+        const roomId = store.snapshot.room?.roomId;
+        if (!roomId) return;
+        const shouldContinue = () => isCurrentGuestMirrorImport(generation, roomId, card.assetId, 'card');
         importingCardAssetId = card.assetId;
         render();
         try {
@@ -353,10 +421,12 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
             // 内容未变且本地副本还在：不下载不导入，直接复用。
             if (!force && known && card.contentHash && known.contentHash === card.contentHash && cardSharing.hasCharacter(known.fileName)) {
-                await cardSharing.selectByAvatar(known.fileName);
+                await cardSharing.selectByAvatar(known.fileName, shouldContinue);
+                if (!shouldContinue()) return;
                 importedCardAssetId = card.assetId;
                 importedCardFileName = known.fileName;
                 rememberImportedCard(card, known.fileName);
+                maybeBindGuestMirror();
                 toastr.info(`角色卡与本地副本一致，已复用：${card.characterName}`, '联机酒馆');
                 return;
             }
@@ -368,21 +438,29 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                 : `stmp_${sanitizeToken(card.contentHash ?? card.assetId).slice(0, 12)}`;
             const result = await cardSharing.importSharedCard({
                 relayUrl: settings.relayUrl,
-                roomId: store.snapshot.room.roomId,
+                roomId,
                 assetId: card.assetId,
                 credentials: settings.credentials,
                 preservedName,
+                shouldContinue,
             });
+            if (!shouldContinue()) return;
             importedCardAssetId = card.assetId;
             importedCardFileName = result.avatarFileName;
             rememberImportedCard(card, result.avatarFileName);
+            maybeBindGuestMirror();
             toastr.success(`已同步完整角色卡：${card.characterName}`, '联机酒馆');
+        } catch (error) {
+            if (!shouldContinue()) return;
+            throw error;
         } finally {
-            importingCardAssetId = null;
-            render();
-            const latest = store.snapshot.sharedCard;
-            if (latest && latest.assetId !== card.assetId) scheduleSharedCardImport();
-            else scheduleSharedSaveImport(); // 联机存档可能在等镜像角色就位
+            if (isCurrentGuestMirrorGeneration(generation, roomId)) {
+                if (importingCardAssetId === card.assetId) importingCardAssetId = null;
+                render();
+                const latest = store.snapshot.sharedCard;
+                if (latest && latest.assetId !== card.assetId) scheduleSharedCardImport();
+                else scheduleSharedSaveImport(); // 联机存档可能在等镜像角色就位
+            }
         }
     }
 
@@ -426,6 +504,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (!force && importedSaveAssetId === save.assetId) return;
         if (importingSaveAssetId) return;
 
+        const generation = mirrorImportGeneration;
+        const roomId = store.snapshot.room?.roomId;
+        if (!roomId) return;
+        const shouldContinue = () => isCurrentGuestMirrorImport(generation, roomId, save.assetId, 'save');
+
         // 存档要写在镜像角色名下；角色卡还没同步时先等（卡片导入完成后会再触发）。
         const targetAvatar = importedCardFileName ?? findImportedCardRecord(store.snapshot.sharedCard)?.fileName ?? null;
         if (!targetAvatar || !cardSharing.hasCharacter(targetAvatar)) {
@@ -438,6 +521,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (!force && record && save.contentHash && record.contentHash === save.contentHash) {
             importedSaveAssetId = save.assetId;
             importedSaveFileName = record.fileName;
+            maybeBindGuestMirror();
             render();
             return;
         }
@@ -448,12 +532,14 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             const fileName = record?.fileName ?? `联机存档-${sanitizeToken(save.saveKey ?? save.assetId).slice(0, 8)}`;
             const result = await saveSharing.importSharedSave({
                 relayUrl: settings.relayUrl,
-                roomId: store.snapshot.room.roomId,
+                roomId,
                 assetId: save.assetId,
                 credentials: settings.credentials,
                 targetAvatar,
                 fileName,
+                shouldContinue,
             });
+            if (!shouldContinue()) return;
             importedSaveAssetId = save.assetId;
             importedSaveFileName = result.fileName;
             if (save.saveKey) {
@@ -461,12 +547,17 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                 saveSettings();
             }
             toastr.success(`已同步联机存档：${save.chatName}（${save.messageCount} 条消息）`, '联机酒馆');
+        } catch (error) {
+            if (!shouldContinue()) return;
+            throw error;
         } finally {
-            importingSaveAssetId = null;
-            maybeBindGuestMirror();
-            render();
-            const latest = store.snapshot.sharedSave;
-            if (latest && latest.assetId !== save.assetId) scheduleSharedSaveImport();
+            if (isCurrentGuestMirrorGeneration(generation, roomId)) {
+                if (importingSaveAssetId === save.assetId) importingSaveAssetId = null;
+                maybeBindGuestMirror();
+                render();
+                const latest = store.snapshot.sharedSave;
+                if (latest && latest.assetId !== save.assetId) scheduleSharedSaveImport();
+            }
         }
     }
 
@@ -1296,6 +1387,9 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (event.detail?.kind === 'event') resumeBarrier.route(event.detail);
     });
     relay.addEventListener('resumed', (event) => {
+        const generation = automaticResumeGeneration;
+        automaticResumeGeneration = null;
+        if (generation === null || generation !== roomLifecycleGeneration) return;
         const result = resumeBarrier.commit(event.detail.payload);
         if (result.closed) return;
         if (result.needsFollowUp) {
@@ -1305,6 +1399,9 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         }
     });
     relay.addEventListener('resumeerror', (event) => {
+        const generation = automaticResumeGeneration;
+        automaticResumeGeneration = null;
+        if (generation === null || generation !== roomLifecycleGeneration) return;
         const error = event.detail;
         if (error?.code === 'NOT_IN_ROOM') {
             resetMissingRemoteRoom({ payload: { room: null } });
@@ -1325,11 +1422,13 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     // resumeProvider：重连成功后先补 hello，再让 relay-client 发 room.resume。
     relay.resumeProvider = async () => {
+        const generation = roomLifecycleGeneration;
+        automaticResumeGeneration = generation;
         resumeBarrier.begin();
         const ack = await hello({ resume: false });
+        if (generation !== roomLifecycleGeneration) return null;
         if (!ack.payload.room) {
             resetMissingRemoteRoom(ack);
-            resumeBarrier.clear();
             return null;
         }
         return { lastAppliedSeq: store.lastAppliedSeq };
@@ -1338,9 +1437,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     store.addEventListener('change', () => {
         // 离房/关房后绑定失效，避免下一局误写上一局的聊天。
         if (!store.inRoom) {
-            resumeBarrier.clear();
+            if (observedInRoom) invalidateRoomLifecycle();
+            resetGuestMirrorLifecycle();
             if (hostBridge.isBound()) hostBridge.unbind();
         }
+        observedInRoom = store.inRoom;
         render();
     });
     store.addEventListener('event', (event) => {

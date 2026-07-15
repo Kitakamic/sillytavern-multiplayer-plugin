@@ -1,3 +1,5 @@
+import { EventType } from './protocol.js';
+
 /**
  * Protects RoomStore from the interval between sending room.resume and applying
  * its acknowledgement.  The relay can fan out a live event before the resume
@@ -17,7 +19,7 @@ export class ResumeEventBarrier {
     #transient = [];
 
     constructor({ store, applySnapshot }) {
-        if (!store || typeof store.applyEvent !== 'function') {
+        if (!store || typeof store.applyEvent !== 'function' || typeof store.advancePast !== 'function') {
             throw new TypeError('ResumeEventBarrier requires a RoomStore-like store.');
         }
         if (typeof applySnapshot !== 'function') {
@@ -86,7 +88,12 @@ export class ResumeEventBarrier {
         this.#discardOtherRooms(roomId);
         this.#discardStale(roomId);
 
-        const drained = this.#drainSequenced(roomId);
+        // 同一 clientId 可以离房后再次加入同一房间。此时 lastAppliedSeq 会从
+        // 0 开始全量回放，旧 membership 的 self-left 必须跨过；它在日志中已
+        // 被本届 membership 的后续 self-joined 覆盖。否则 RoomStore 会在
+        // 读到旧 self-left 时 reset，永远到不了当前 self-joined。
+        const currentSelfJoinSeq = this.#currentSelfJoinSequence(roomId);
+        const drained = this.#drainSequenced(roomId, currentSelfJoinSeq);
         if (drained.closed) return { needsFollowUp: false, closed: true };
 
         const ackLastSeq = Number.isInteger(payload.lastSeq)
@@ -137,13 +144,21 @@ export class ResumeEventBarrier {
         }
     }
 
-    #drainSequenced(roomId) {
+    #drainSequenced(roomId, currentSelfJoinSeq = null) {
         while (this.#store.inRoom) {
             const expected = this.#store.lastAppliedSeq + 1;
             const key = this.#sequenceKey(roomId, expected);
             const event = this.#sequenced.get(key);
             if (!event) break;
             this.#sequenced.delete(key);
+
+            if (this.#isSupersededSelfLeave(event, currentSelfJoinSeq)) {
+                if (!this.#store.advancePast(event)) {
+                    this.#sequenced.set(key, event);
+                    break;
+                }
+                continue;
+            }
 
             // This should only return false if a foreign/malformed event slipped
             // through.  Put it back and request another authoritative replay.
@@ -158,6 +173,33 @@ export class ResumeEventBarrier {
             return { closed: true };
         }
         return { closed: false };
+    }
+
+    /**
+     * Return the sequence that started the membership represented by the
+     * authoritative snapshot.  A valid resume snapshot contains the caller as
+     * a member; therefore the latest logged self-join is its current seat.
+     */
+    #currentSelfJoinSequence(roomId) {
+        const selfClientId = this.#store.selfClientId;
+        if (!selfClientId) return null;
+        const selfIsPresent = this.#store.snapshot.members.some((member) => member.clientId === selfClientId);
+        if (!selfIsPresent) return null;
+
+        let latest = null;
+        for (const event of this.#sequenced.values()) {
+            if (event.roomId !== roomId || event.type !== EventType.ROOM_MEMBER_JOINED) continue;
+            if (event.payload?.member?.clientId !== selfClientId || !Number.isInteger(event.seq)) continue;
+            latest = latest === null ? event.seq : Math.max(latest, event.seq);
+        }
+        return latest;
+    }
+
+    #isSupersededSelfLeave(event, currentSelfJoinSeq) {
+        return currentSelfJoinSeq !== null
+            && event.type === EventType.ROOM_MEMBER_LEFT
+            && event.payload?.clientId === this.#store.selfClientId
+            && event.seq < currentSelfJoinSeq;
     }
 
     #drainTransient(roomId) {

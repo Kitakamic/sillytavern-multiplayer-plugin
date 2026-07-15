@@ -1,5 +1,13 @@
 import { relayHttpOrigin, requireSession, responseError, sha256Hex } from './relay-http.js';
 
+function assertCurrentImport(shouldContinue) {
+    if (typeof shouldContinue === 'function' && !shouldContinue()) {
+        const error = new Error('联机存档导入已过期。');
+        error.code = 'STALE_IMPORT';
+        throw error;
+    }
+}
+
 /**
  * 联机存档共享模块。当前聊天的 jsonl 就是这局联机的存档：
  * 房主把它原样上传到中继（kind=chat），客机下载后写进镜像角色名下，
@@ -69,7 +77,7 @@ export class ChatSaveSharing {
      * （覆盖写入，force 跳过完整性检查——快照来自另一台机器）。
      * 若客机当前正打开该角色，则顺便切到这份存档。
      */
-    async importSharedSave({ relayUrl, roomId, assetId, credentials, targetAvatar, fileName }) {
+    async importSharedSave({ relayUrl, roomId, assetId, credentials, targetAvatar, fileName, shouldContinue = null }) {
         const context = this.#context();
         const download = await this.fetch(`${relayHttpOrigin(relayUrl)}/rooms/${encodeURIComponent(roomId)}/assets/${encodeURIComponent(assetId)}`, {
             headers: requireSession(credentials),
@@ -93,6 +101,7 @@ export class ChatSaveSharing {
         // 完整性签名属于房主的原文件；留着会让客机后续保存报 integrity 冲突。
         if (lines[0]?.chat_metadata?.integrity) delete lines[0].chat_metadata.integrity;
 
+        assertCurrentImport(shouldContinue);
         const saved = await this.fetch('/api/chats/save', {
             method: 'POST',
             headers: context.getRequestHeaders(),
@@ -111,6 +120,7 @@ export class ChatSaveSharing {
         let opened = false;
         if (current?.avatar === targetAvatar && typeof context.openCharacterChat === 'function') {
             try {
+                assertCurrentImport(shouldContinue);
                 await context.openCharacterChat(fileName);
                 opened = true;
             } catch (error) {

@@ -79,6 +79,35 @@ const downloadCall = calls.find((call) => call.url.endsWith('/rooms/room-1/asset
 assert.equal(downloadCall.options.headers['x-relay-client-id'], 'guest-1');
 console.log('PASS guest downloads, replaces, and selects the room card');
 
+// 旧房间下载可以完成，但若生命周期已切换，绝不进入本地导入/选角副作用。
+let staleImportPosted = false;
+const staleContext = {
+    characters: [{ name: '旧角色', avatar: 'old.png' }],
+    async getCharacters() {},
+    async selectCharacterById() {
+        throw new Error('stale import selected a character');
+    },
+    getRequestHeaders: ({ omitContentType } = {}) => (omitContentType ? {} : { 'content-type': 'application/json' }),
+};
+const staleSharing = new CharacterCardSharing(staleContext, async (url) => {
+    if (String(url).includes('/rooms/room-1/assets/asset-stale')) return new Response(png, { status: 200 });
+    if (url === '/api/characters/import') staleImportPosted = true;
+    throw new Error(`unexpected stale fetch ${url}`);
+});
+await assert.rejects(
+    staleSharing.importSharedCard({
+        relayUrl: 'ws://127.0.0.1:3001/ws',
+        roomId: 'room-1',
+        assetId: 'asset-stale',
+        credentials: { clientId: 'guest-1', sessionToken: 'guest-secret' },
+        preservedName: 'stale',
+        shouldContinue: () => false,
+    }),
+    /已过期/,
+);
+assert.equal(staleImportPosted, false);
+console.log('PASS stale card import cannot mutate the active character');
+
 assert.equal(CommandType.ROOM_CARD_UPDATE, 'room.card.update');
 assert.equal(CommandType.ROOM_CARD_CLEAR, 'room.card.clear');
 const store = new RoomStore();
