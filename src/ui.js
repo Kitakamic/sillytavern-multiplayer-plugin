@@ -1118,7 +1118,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     // ---------- 操作绑定 ----------
     function guarded(action) {
-        return () => action().catch((error) => toastr.error(errorText(error), '联机酒馆'));
+        // 必须转发 this/参数：jQuery 委托处理器（如踢人按钮）靠 this 拿触发元素。
+        return function (...args) {
+            return Promise.resolve(action.apply(this, args))
+                .catch((error) => toastr.error(errorText(error), '联机酒馆'));
+        };
     }
 
     windowEl.find('.stmp-join').on('click', guarded(async () => {
