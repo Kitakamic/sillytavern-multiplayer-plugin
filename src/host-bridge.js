@@ -154,9 +154,16 @@ export function createHostBridge(contextProvider) {
         const chat = context.chat ?? [];
         const index = chat.findIndex((m) => m?.extra?.stmpMessageId === messageId);
         if (index < 0) return false;
-        if (chat[index].mes === text) return false;
-        chat[index].mes = text;
-        context.updateMessageBlock?.(index, chat[index]);
+        const message = chat[index];
+        if (message.mes === text) return false;
+        message.mes = text;
+        // 与酒馆原生编辑一致：带 swipe 的消息要同步当前 swipe 槽位，
+        // 否则本地 swipe 一次再滑回来，文本会回退成编辑前的旧版。
+        if (message.swipe_id !== undefined) {
+            if (!Array.isArray(message.swipes)) message.swipes = [];
+            message.swipes[message.swipe_id] = text;
+        }
+        context.updateMessageBlock?.(index, message);
         void Promise.resolve(context.saveChat()).catch(() => { /* 尽力而为 */ });
         return true;
     }
@@ -269,6 +276,35 @@ export function createHostBridge(contextProvider) {
         return true;
     }
 
+    /**
+     * 清理落盘残留的流式气泡：生成期间切走聊天时，占位气泡会随酒馆
+     * 切聊天存盘写进镜像 jsonl，而定稿/移除只作用于当前打开的聊天。
+     * 重新绑定或切回时把不属于当前活动气泡的残影删掉（活动气泡保留，
+     * 生成尚在进行时切回可以继续流式更新）。
+     */
+    function pruneStaleStreamBubbles() {
+        if (!isBoundChatOpen()) return 0;
+        const context = getContext();
+        const chat = context.chat ?? [];
+        let removed = 0;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const bubbleId = chat[i]?.extra?.stmpStreamBubble;
+            if (!bubbleId || bubbleId === streamBubbleId) continue;
+            chat.splice(i, 1);
+            removed += 1;
+        }
+        if (removed) {
+            try {
+                context.clearChat?.();
+                context.printMessages?.();
+            } catch (error) {
+                console.warn('[ST Multiplayer] 清理残留流式气泡后的重绘失败：', error);
+            }
+            void Promise.resolve(context.saveChat()).catch(() => { /* 尽力而为 */ });
+        }
+        return removed;
+    }
+
     return {
         missingApis,
         isBound,
@@ -288,5 +324,6 @@ export function createHostBridge(contextProvider) {
         beginStreamBubble,
         updateStreamBubble,
         endStreamBubble,
+        pruneStaleStreamBubbles,
     };
 }

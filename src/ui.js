@@ -652,6 +652,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             hostBridge.bindCurrentChat();
             hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
             pruneDeletedMessages();
+            hostBridge.pruneStaleStreamBubbles();
             refreshSyncedIdsBaseline();
             render();
         } catch (error) {
@@ -843,10 +844,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         es.on(et.GENERATION_ENDED, () => void onGenerationEnded());
         es.on(et.CHAT_CHANGED, () => {
             maybeBindGuestMirror();
-            // 切回绑定聊天时补写离开期间落下的故事、修复文本、清理已删消息（全部幂等）。
+            // 切回绑定聊天时补写离开期间落下的故事、修复文本、清理已删消息与残留气泡（全部幂等）。
             if (store.role === 'host' && hostBridge.isBoundChatOpen()) hostBridge.catchUp(store.snapshot.timeline);
             if (guestMirrorReady()) hostBridge.catchUp(store.snapshot.timeline, { includeAssistant: true });
             pruneDeletedMessages();
+            hostBridge.pruneStaleStreamBubbles();
             refreshSyncedIdsBaseline();
             refreshPersonaIdentity();
             render();
@@ -1476,8 +1478,10 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             if (type === EventType.GENERATION_PROGRESSED && typeof payload?.text === 'string') {
                 hostBridge.updateStreamBubble(payload.text);
             }
-            if (type === EventType.GENERATION_FINISHED && hostBridge.hasStreamBubble()) {
-                // 正常情况下权威 assistant 消息先到、气泡已定稿；走到这里说明生成失败/中止。
+            if (type === EventType.GENERATION_FINISHED) {
+                // 正常情况下权威 assistant 消息先到、气泡已定稿（此处 no-op）；气泡还在
+                // 说明生成失败/中止。气泡不在当前聊天（生成期间切走了）时也必须复位
+                // 气泡 ID，否则落盘残影会被当成活动气泡而躲过重绑时的清理。
                 hostBridge.endStreamBubble(null);
             }
         }
