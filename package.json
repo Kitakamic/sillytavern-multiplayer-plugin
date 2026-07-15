@@ -1,17 +1,17 @@
 {
   "name": "sillytavern-multiplayer-plugin",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Private multiplayer rooms for SillyTavern",
   "scripts": {
-    "check": "node --check index.js && node --check src/card-sharing.js && node --check src/host-bridge.js && node --check src/kick-command.js && node --check src/persona-name.js && node --check src/protocol.js && node --check src/relay-client.js && node --check src/room-store.js && node --check src/settings.js && node --check src/ui.js",
-    "test": "npm run test:card && npm run test:kick && npm run test:persona && npm run test:settings",
+    "check": "node --check index.js && node --check src/card-sharing.js && node --check src/host-bridge.js && node --check src/kick-command.js && node --check src/persona-name.js && node --check src/protocol.js && node --check src/relay-client.js && node --check src/relay-http.js && node --check src/resume-event-barrier.js && node --check src/room-store.js && node --check src/save-sharing.js && node --check src/settings.js && node --check src/ui.js",
+    "test": "npm run test:card && npm run test:kick && npm run test:persona && npm run test:resume-barrier && npm run test:settings",
     "test:card": "node scripts/card-sharing.test.mjs",
     "test:kick": "node scripts/kick-command.test.mjs",
     "test:persona": "node scripts/persona-name.test.mjs",
+    "test:resume-barrier": "node scripts/resume-event-barrier.test.mjs",
     "test:settings": "node scripts/settings.test.mjs",
     "smoke": "node scripts/smoke-client.mjs"
   }
 }
-

@@ -6,6 +6,7 @@
 //       RELAY_CREATOR_KEY=...        → 房主密钥；缺省时读同级 relay 仓库 data/local-relay-state.json。
 import { readFileSync } from 'node:fs';
 import { RelayClient } from '../src/relay-client.js';
+import { ResumeEventBarrier } from '../src/resume-event-barrier.js';
 import { RoomStore } from '../src/room-store.js';
 import { CommandType, createCommand, createInviteCode, parseInviteCode } from '../src/protocol.js';
 
@@ -103,8 +104,12 @@ class Player {
         this.client = new RelayClient();
         this.client.reconnectEnabled = false;
         this.store = new RoomStore();
+        this.resumeBarrier = new ResumeEventBarrier({
+            store: this.store,
+            applySnapshot: (payload, roomHint) => this.applyResumeSnapshot(payload, roomHint),
+        });
         this.client.addEventListener('message', (event) => {
-            if (event.detail?.kind === 'event') this.store.applyEvent(event.detail);
+            if (event.detail?.kind === 'event') this.resumeBarrier.route(event.detail);
         });
     }
 
@@ -120,16 +125,13 @@ class Player {
         return reply;
     }
 
-    /** 与 ui.js 的 applyResume 相同的恢复路径。 */
-    async resume() {
-        const reply = await this.client.request(createCommand(CommandType.ROOM_RESUME, {
-            lastAppliedSeq: this.store.inRoom ? this.store.lastAppliedSeq : 0,
-        }));
-        const payload = reply.payload;
-        if (!this.store.inRoom || this.store.snapshot.room.roomId !== payload.roomId) {
+    /** 与 ui.js 相同：快照由 barrier 先落地，ack/即时事件按 seq 合并。 */
+    applyResumeSnapshot(payload, roomHint = null) {
+        const roomId = payload.roomId ?? roomHint?.roomId;
+        if (!this.store.inRoom || this.store.snapshot.room.roomId !== roomId) {
             this.store.seedRoom({
-                roomId: payload.roomId,
-                role: payload.role,
+                roomId,
+                role: payload.role ?? roomHint?.role,
                 selfClientId: this.creds.clientId,
                 members: payload.members,
                 generating: payload.generating,
@@ -137,8 +139,28 @@ class Player {
         } else {
             this.store.syncPresence({ members: payload.members, generating: payload.generating });
         }
-        for (const event of payload.events ?? []) this.store.applyEvent(event);
-        return reply;
+    }
+
+    beginResumeWindow() {
+        this.resumeBarrier.begin();
+    }
+
+    async resume(roomHint = null) {
+        this.resumeBarrier.begin();
+        let hint = roomHint;
+        let reply;
+        try {
+            while (true) {
+                reply = await this.client.request(createCommand(CommandType.ROOM_RESUME, {
+                    lastAppliedSeq: this.store.inRoom ? this.store.lastAppliedSeq : 0,
+                }));
+                const result = this.resumeBarrier.commit(reply.payload, hint);
+                hint = null;
+                if (result.closed || !result.needsFollowUp) return reply;
+            }
+        } finally {
+            if (this.resumeBarrier.active) this.resumeBarrier.end();
+        }
     }
 }
 
@@ -147,6 +169,7 @@ const creatorKey = loadCreatorKey();
 const host = new Player('房主');
 await host.connect();
 await host.hello();
+host.beginResumeWindow();
 const created = await host.client.request(createCommand(CommandType.ROOM_CREATE, { creatorKey }));
 const roomId = created.payload.roomId;
 const roomInvite = createInviteCode({ relayUrl: wsUrl, roomId, token: created.payload.inviteToken });
@@ -158,6 +181,7 @@ const guest = new Player('客人');
 await guest.connect();
 await guest.hello();
 const parsedInvite = parseInviteCode(roomInvite);
+guest.beginResumeWindow();
 await guest.client.request(createCommand(CommandType.ROOM_JOIN, { roomId: parsedInvite.roomId, token: parsedInvite.token }));
 await guest.resume();
 if (guest.store.snapshot.members.length !== 2) fail('guest store does not see both members');
@@ -232,6 +256,7 @@ guest.client.disconnect();
 await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '风把门吹开了。', authorName: '角色', role: 'assistant' }));
 await host.client.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, { text: '（旁白推进）', authorName: '角色', role: 'assistant' }));
 await guest.connect();
+guest.beginResumeWindow();
 const rehello = await guest.hello();
 if (rehello.payload.room?.roomId !== roomId) fail('hello did not report resumable room');
 await guest.resume();

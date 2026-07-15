@@ -1,6 +1,7 @@
 import { CommandType, EventType, createCommand, createInviteCode, parseInviteCode } from './protocol.js';
 import { createKickCommand } from './kick-command.js';
 import { getCurrentPersonaName, getMessagePersonaName } from './persona-name.js';
+import { ResumeEventBarrier } from './resume-event-barrier.js';
 
 const PANEL_ID = 'st-multiplayer-panel';
 const WINDOW_ID = 'stmp-window';
@@ -60,7 +61,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     // ---------- 控制层状态 ----------
     let helloDone = false;
     let expectHello = false;
-    let resumeInFlight = false;
+    let resumeInFlight = null;
+    let resumeFollowUpRequested = false;
     let lastInviteCode = '';
     let importingCardAssetId = null;
     let importedCardAssetId = null;
@@ -102,6 +104,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             const ack = await relay.request(createCommand(CommandType.AUTH_HELLO, helloPayload(displayName)));
             acceptHello(ack, displayName);
             if (resume && ack.payload.room) await resumeRoom(ack.payload.room);
+            else if (resume) resetMissingRemoteRoom(ack);
             return ack;
         })();
         helloPromise = pending;
@@ -124,7 +127,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                 if (displayName === advertisedPersonaName) return displayName;
                 const ack = await relay.request(createCommand(CommandType.AUTH_HELLO, helloPayload(displayName)));
                 acceptHello(ack, displayName);
-                if (!ack.payload.room && store.inRoom) store.reset('host_left');
+                resetMissingRemoteRoom(ack);
             }
         })();
 
@@ -141,21 +144,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         });
     }
 
-    /** 入房/建房/重连/缺口共用的恢复路径：resume 应答 = 权威快照 + 增量回放。 */
-    async function resumeRoom(roomHint = null) {
-        if (resumeInFlight) return;
-        resumeInFlight = true;
-        try {
-            const ack = await relay.request(createCommand(CommandType.ROOM_RESUME, {
-                lastAppliedSeq: store.inRoom ? store.lastAppliedSeq : 0,
-            }));
-            applyResume(ack.payload, roomHint);
-        } finally {
-            resumeInFlight = false;
-        }
-    }
-
-    function applyResume(payload, roomHint = null) {
+    /** room.resume ack 中的权威快照；增量事件由 resumeBarrier 按 seq 合并。 */
+    function applyResumeSnapshot(payload, roomHint = null) {
         const roomId = payload.roomId ?? roomHint?.roomId;
         if (!store.inRoom || store.snapshot.room.roomId !== roomId) {
             store.seedRoom({
@@ -168,7 +158,53 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         } else {
             store.syncPresence({ members: payload.members, generating: payload.generating });
         }
-        for (const event of payload.events ?? []) store.applyEvent(event);
+    }
+
+    const resumeBarrier = new ResumeEventBarrier({ store, applySnapshot: applyResumeSnapshot });
+
+    function resetMissingRemoteRoom(ack) {
+        if (ack?.payload?.room) return false;
+        resumeBarrier.clear();
+        if (!store.inRoom) return false;
+        store.reset('host_left');
+        return true;
+    }
+
+    /** 入房/建房/重连/缺口共用的恢复路径：ack 与即时事件会在 barrier 内连续合并。 */
+    async function resumeRoom(roomHint = null) {
+        resumeBarrier.begin();
+        if (resumeInFlight) {
+            resumeFollowUpRequested = true;
+            return resumeInFlight;
+        }
+
+        let pending;
+        pending = (async () => {
+            let hint = roomHint;
+            while (true) {
+                resumeFollowUpRequested = false;
+                const ack = await relay.request(createCommand(CommandType.ROOM_RESUME, {
+                    lastAppliedSeq: store.inRoom ? store.lastAppliedSeq : 0,
+                }));
+                const result = resumeBarrier.commit(ack.payload, hint);
+                hint = null;
+                if (result.closed || (!result.needsFollowUp && !resumeFollowUpRequested)) return result;
+            }
+        })();
+        resumeInFlight = pending;
+
+        try {
+            return await pending;
+        } catch (error) {
+            if (error?.code === 'NOT_IN_ROOM') resetMissingRemoteRoom({ payload: { room: null } });
+            throw error;
+        } finally {
+            if (resumeInFlight === pending) {
+                resumeInFlight = null;
+                resumeFollowUpRequested = false;
+                if (resumeBarrier.active) resumeBarrier.end();
+            }
+        }
     }
 
     function waitForConnected() {
@@ -199,7 +235,20 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             relay.connect(target);
             await waitForConnected();
         }
-        if (!helloDone) await hello();
+        if (!helloDone) {
+            // 覆盖手动重连时 auth.hello 与紧随其后的 room.resume 之间的事件窗口。
+            resumeBarrier.begin();
+            try {
+                const ack = await hello();
+                if (!ack.payload.room) {
+                    resetMissingRemoteRoom(ack);
+                    resumeBarrier.clear();
+                }
+            } catch (error) {
+                resumeBarrier.clear();
+                throw error;
+            }
+        }
     }
     let currentUrl = null;
 
@@ -209,27 +258,42 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         saveSettings();
         await ensureSession(invite.relayUrl);
         if (store.inRoom) throw Object.assign(new Error('已在房间中。'), { code: 'ALREADY_IN_ROOM' });
-        await relay.request(createCommand(CommandType.ROOM_JOIN, { roomId: invite.roomId, token: invite.token }));
-        lastInviteCode = code.trim();
-        await resumeRoom();
-        toastr.success('已加入房间。', '联机酒馆');
+        // room.member.joined 可能在 join ack 前抵达，先打开恢复栅栏。
+        resumeBarrier.begin();
+        try {
+            await relay.request(createCommand(CommandType.ROOM_JOIN, { roomId: invite.roomId, token: invite.token }));
+            lastInviteCode = code.trim();
+            await resumeRoom();
+            toastr.success('已加入房间。', '联机酒馆');
+        } catch (error) {
+            resumeBarrier.clear();
+            throw error;
+        }
     }
 
     async function createRoom(creatorKey) {
         if (!settings.relayUrl) throw new Error('请先在扩展设置中填写 Relay 地址。');
         await ensureSession(settings.relayUrl);
         if (store.inRoom) throw Object.assign(new Error('已在房间中。'), { code: 'ALREADY_IN_ROOM' });
-        const ack = await relay.request(createCommand(CommandType.ROOM_CREATE, { creatorKey }));
-        lastInviteCode = createInviteCode({
-            relayUrl: settings.relayUrl,
-            roomId: ack.payload.roomId,
-            token: ack.payload.inviteToken,
-        });
-        await resumeRoom();
-        toastr.success('房间已创建，邀请码已生成。', '联机酒馆');
+        // room.member.joined 与 create ack 的顺序不承诺，必须同样缓冲。
+        resumeBarrier.begin();
+        try {
+            const ack = await relay.request(createCommand(CommandType.ROOM_CREATE, { creatorKey }));
+            lastInviteCode = createInviteCode({
+                relayUrl: settings.relayUrl,
+                roomId: ack.payload.roomId,
+                token: ack.payload.inviteToken,
+            });
+            await resumeRoom();
+            toastr.success('房间已创建，邀请码已生成。', '联机酒馆');
+        } catch (error) {
+            resumeBarrier.clear();
+            throw error;
+        }
     }
 
     async function leaveRoom() {
+        resumeBarrier.clear();
         await relay.request(createCommand(CommandType.ROOM_LEAVE));
         lastInviteCode = '';
         store.reset('left');
@@ -1229,16 +1293,23 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     // ---------- 事件接线 ----------
     relay.addEventListener('message', (event) => {
-        if (event.detail?.kind === 'event') store.applyEvent(event.detail);
+        if (event.detail?.kind === 'event') resumeBarrier.route(event.detail);
     });
     relay.addEventListener('resumed', (event) => {
-        applyResume(event.detail.payload);
+        const result = resumeBarrier.commit(event.detail.payload);
+        if (result.closed) return;
+        if (result.needsFollowUp) {
+            resumeRoom().catch((error) => console.error('[ST Multiplayer] room.resume 补拉失败：', error));
+        } else {
+            resumeBarrier.end();
+        }
     });
     relay.addEventListener('resumeerror', (event) => {
         const error = event.detail;
         if (error?.code === 'NOT_IN_ROOM') {
-            if (store.inRoom) store.reset('host_left');
+            resetMissingRemoteRoom({ payload: { room: null } });
         } else {
+            resumeBarrier.clear();
             console.warn('[ST Multiplayer] room.resume 失败：', error);
             toastr.warning('重连后同步房间失败，将继续重试。', '联机酒馆');
         }
@@ -1254,9 +1325,11 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     // resumeProvider：重连成功后先补 hello，再让 relay-client 发 room.resume。
     relay.resumeProvider = async () => {
+        resumeBarrier.begin();
         const ack = await hello({ resume: false });
         if (!ack.payload.room) {
-            if (store.inRoom) store.reset('host_left');
+            resetMissingRemoteRoom(ack);
+            resumeBarrier.clear();
             return null;
         }
         return { lastAppliedSeq: store.lastAppliedSeq };
@@ -1264,7 +1337,10 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     store.addEventListener('change', () => {
         // 离房/关房后绑定失效，避免下一局误写上一局的聊天。
-        if (!store.inRoom && hostBridge.isBound()) hostBridge.unbind();
+        if (!store.inRoom) {
+            resumeBarrier.clear();
+            if (hostBridge.isBound()) hostBridge.unbind();
+        }
         render();
     });
     store.addEventListener('event', (event) => {
