@@ -86,3 +86,37 @@ function makeContext() {
     assert.equal(context.chat.length, 0);
     console.log('PASS 气泡不在场时生成结束也复位活动 ID，重绑后残影可清');
 }
+
+// 远端成员的发言必须带 force_avatar：UI 才不会用看者本人的头像渲染，
+// 且酒馆默认名字行为（CC 的 DEFAULT / Instruct 的 FORCE）靠它给 prompt
+// 加“名字: ”前缀——否则 AI 分不清多名成员的发言。AI 回复不需要。
+{
+    const context = makeContext();
+    const bridge = createHostBridge(() => context);
+    bridge.bindCurrentChat();
+    bridge.writeStoryMessage({ messageId: 'u1', authorName: '小明', text: '你好', role: 'user' });
+    bridge.writeStoryMessage({ messageId: 'a1', authorName: '角色', text: '回复', role: 'assistant' });
+    assert.equal(context.chat[0].force_avatar, 'img/user-default.png');
+    assert.equal(context.chat[0].name, '小明');
+    assert.equal(Object.hasOwn(context.chat[1], 'force_avatar'), false);
+    console.log('PASS 成员发言带默认强制头像，AI 回复不带');
+}
+
+// 旧版本写入的历史成员消息没有 force_avatar：catchUp 补打（只认插件
+// 代写的 stmpAuthor 消息，自己经输入框发的原生消息不能被误改）。
+{
+    const context = makeContext();
+    const bridge = createHostBridge(() => context);
+    bridge.bindCurrentChat();
+    context.chat.push(
+        { name: '小红', is_user: true, is_system: false, mes: '旧消息', extra: { stmpMessageId: 'u1', stmpAuthor: '小红' } },
+        { name: '我', is_user: true, is_system: false, mes: '自己的消息', extra: { stmpMessageId: 'u2' } },
+    );
+    bridge.catchUp([
+        { messageId: 'u1', authorName: '小红', text: '旧消息', role: 'user' },
+        { messageId: 'u2', authorName: '我', text: '自己的消息', role: 'user' },
+    ]);
+    assert.equal(context.chat[0].force_avatar, 'img/user-default.png');
+    assert.equal(Object.hasOwn(context.chat[1], 'force_avatar'), false);
+    console.log('PASS catchUp 给历史成员消息补打强制头像，自己的消息不受影响');
+}

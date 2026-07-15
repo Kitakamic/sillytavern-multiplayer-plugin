@@ -24,6 +24,15 @@ const REQUIRED_APIS = [
 
 const REPLY_SETTLE_TIMEOUT_MS = 3000;
 
+/**
+ * 远端成员消息的强制头像（酒馆默认用户头像，script.js 的 default_user_avatar）。
+ * force_avatar 是酒馆对“非当前 Persona 的 user 消息”的标准标记（/sendas、
+ * past personas 同款）：UI 不再用看者本人的头像渲染，而且 Chat Completion
+ * 的 DEFAULT 与 Instruct 的 FORCE 名字行为都靠它决定给 prompt 加
+ * “名字: ”前缀——没有它，AI 会把所有成员的发言当成同一个 {{user}}。
+ */
+const REMOTE_USER_AVATAR = 'img/user-default.png';
+
 export function createHostBridge(contextProvider) {
     const getContext = () => (typeof contextProvider === 'function' ? contextProvider() : contextProvider);
 
@@ -92,6 +101,8 @@ export function createHostBridge(contextProvider) {
             mes: text,
             extra: { stmpMessageId: messageId, stmpAuthor: authorName },
         };
+        // 别人的发言要能被认出来：头像与 prompt 名字前缀都由 force_avatar 驱动。
+        if (role === 'user') message.force_avatar = REMOTE_USER_AVATAR;
         context.chat.push(message);
         context.addOneMessage(message);
         const saved = Promise.resolve(context.saveChat()).catch((error) => {
@@ -127,6 +138,7 @@ export function createHostBridge(contextProvider) {
             if (entry.role !== 'user' && !(includeAssistant && entry.role === 'assistant')) continue;
             if (hasMessage(entry.messageId)) {
                 applyRemoteUpdate({ messageId: entry.messageId, text: entry.text });
+                backfillRemoteAvatar(entry.messageId);
                 continue;
             }
             const result = writeStoryMessage({
@@ -138,6 +150,18 @@ export function createHostBridge(contextProvider) {
             if (result.written) written += 1;
         }
         return written;
+    }
+
+    /**
+     * 旧版本写入的远端成员消息没有 force_avatar，重绑/切回时幂等补打。
+     * 只认 stmpAuthor（插件代写的消息才有），自己经原生输入框发的消息
+     * 不会被误改；不主动落盘，随下一次聊天保存持久化。
+     */
+    function backfillRemoteAvatar(messageId) {
+        const chat = getContext().chat ?? [];
+        const message = chat.find((m) => m?.extra?.stmpMessageId === messageId);
+        if (!message?.is_user || !message.extra?.stmpAuthor || message.force_avatar) return;
+        message.force_avatar = REMOTE_USER_AVATAR;
     }
 
     /** 当前绑定聊天里已同步消息的 ID 列表（删除检测的影子基线）。 */
