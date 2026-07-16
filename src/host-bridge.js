@@ -103,8 +103,22 @@ export function createHostBridge(contextProvider) {
         };
         // 别人的发言要能被认出来：头像与 prompt 名字前缀都由 force_avatar 驱动。
         if (role === 'user') message.force_avatar = REMOTE_USER_AVATAR;
-        context.chat.push(message);
-        context.addOneMessage(message);
+
+        // 权威顺序里，正在生成的 AI 回复排在本回合全部发言之后：活动流式
+        // 气泡在场时，成员发言必须插到气泡前面，而不是排到气泡下面。
+        const bubble = role === 'user' ? findStreamBubble() : null;
+        if (bubble) {
+            context.chat.splice(bubble.index, 0, message);
+            try {
+                context.clearChat?.();
+                context.printMessages?.();
+            } catch (error) {
+                console.warn('[ST Multiplayer] 气泡前插入发言后的重绘失败：', error);
+            }
+        } else {
+            context.chat.push(message);
+            context.addOneMessage(message);
+        }
         const saved = Promise.resolve(context.saveChat()).catch((error) => {
             console.error('[ST Multiplayer] 联机消息落盘失败：', error);
         });

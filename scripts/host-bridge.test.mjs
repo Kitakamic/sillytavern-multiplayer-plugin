@@ -120,3 +120,21 @@ function makeContext() {
     assert.equal(Object.hasOwn(context.chat[1], 'force_avatar'), false);
     console.log('PASS catchUp 给历史成员消息补打强制头像，自己的消息不受影响');
 }
+
+// 活动流式气泡在场时，后到的成员发言必须插到气泡前面（AI 回复的权威
+// 顺序在本回合全部发言之后），而不是排到气泡下面。
+{
+    const context = makeContext();
+    const bridge = createHostBridge(() => context);
+    bridge.bindCurrentChat();
+    assert.equal(bridge.beginStreamBubble('角色'), true);
+    bridge.writeStoryMessage({ messageId: 'u1', authorName: '房主', text: '迟到的发言', role: 'user' });
+    assert.equal(context.chat.length, 2);
+    assert.equal(context.chat[0].extra.stmpMessageId, 'u1');
+    assert.equal(Object.hasOwn(context.chat[1].extra, 'stmpStreamBubble'), true);
+    // 气泡仍是活动气泡，定稿在末尾原地完成
+    assert.equal(bridge.endStreamBubble({ text: '正式回复', messageId: 'a1', name: '角色' }), true);
+    assert.equal(context.chat[1].mes, '正式回复');
+    assert.equal(context.chat[1].extra.stmpMessageId, 'a1');
+    console.log('PASS 活动气泡在场时成员发言插到气泡前，定稿顺序正确');
+}

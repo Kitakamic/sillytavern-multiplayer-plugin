@@ -661,7 +661,6 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     }
 
     /** 原生输入框发出的消息 → 发布到房间；ack 后打同步标记（回声事件亦会补标）。 */
-    let lastUserPublish = Promise.resolve();
     async function onNativeMessageSent(index) {
         if (relay.state !== 'connected' || !nativeSyncEligible()) return;
         const message = stContext()?.chat?.[index];
@@ -670,7 +669,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         const text = String(message.mes ?? '').trim();
         if (!text) return;
         const authorName = getMessagePersonaName(message, stContext);
-        const publishTask = (async () => {
+        try {
             await syncPersonaIdentity();
             const ack = await relay.request(createCommand(CommandType.STORY_MESSAGE_PUBLISH, {
                 text: text.slice(0, 8000),
@@ -678,11 +677,6 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                 role: 'user',
             }));
             message.extra = { ...message.extra, stmpMessageId: message.extra?.stmpMessageId ?? ack.payload.messageId };
-        })();
-        // generation.start 的顺序栅栏只等它 settle：发布失败也不能卡住生成广播。
-        lastUserPublish = publishTask.then(() => {}, () => {});
-        try {
-            await publishTask;
         } catch (error) {
             toastr.error(`这条发言没有同步到房间（${errorText(error)}），其他成员看不到。`, '联机酒馆');
         }
@@ -738,9 +732,14 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     }
 
     // 房主端生成观察：原生触发的生成（含输入框发送后的自动生成）也全程转发。
+    //
+    // 注意时序：酒馆的 GENERATION_STARTED（script.js:4132）发生在 sendMessageAsUser
+    // → MESSAGE_SENT（script.js:4288）之前，两者之间还有 pingServer 等异步边界，
+    // 所以 generation.start 必然先于本回合发言的 story.message.publish 到达中继，
+    // 发送端没有可靠锚点可等。显示顺序由客机端保证：流式气泡推迟到第一帧
+    // generation.progressed 才创建，且成员发言写入时永远插到活动气泡之前。
     let genWatch = null;
     let lastStreamSent = 0;
-    let generationStartSent = Promise.resolve();
 
     function onGenerationStarted(type, _params, dryRun) {
         // 只转发普通生成；swipe/regenerate/continue 是对已有消息的修改，
@@ -749,12 +748,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         if (store.role !== 'host' || !store.inRoom || !hostBridge.isBoundChatOpen()) return;
         genWatch = { baseline: stContext().chat.length };
         lastStreamSent = 0;
-        // 发言发布与 generation.start 并发时后者常抢先到达中继：客机先建流式
-        // 气泡，刚发的那句反而排到气泡下面（直到定稿才复位）。先等本回合的
-        // 发言发布 settle 再宣布生成开始，保证中继侧顺序 = 发言 → 生成。
-        generationStartSent = lastUserPublish
-            .then(() => relay.request(createCommand(CommandType.GENERATION_START)))
-            .then(() => {}, () => { /* 状态广播尽力而为 */ });
+        void relay.request(createCommand(CommandType.GENERATION_START)).catch(() => { /* 状态广播尽力而为 */ });
     }
 
     function onStreamToken(text) {
@@ -797,11 +791,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         } catch (error) {
             toastr.error(`AI 回复未能同步到房间：${errorText(error)}`, '联机酒馆');
         } finally {
-            // finish 沿用 start 的栅栏：万一 start 还在等发言发布，抢先发出的
-            // finish 会让房间的 generating 标志卡到下一回合才被复位。
-            void generationStartSent
-                .then(() => relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })))
-                .catch(() => { /* 尽力而为 */ });
+            void relay.request(createCommand(CommandType.GENERATION_FINISH, { ok })).catch(() => { /* 尽力而为 */ });
         }
     }
 
@@ -1492,10 +1482,14 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
         // 客机：把房主的流式生成实时映射成镜像聊天里的气泡。
         if (store.role === 'guest') {
-            if (type === EventType.GENERATION_STARTED && guestMirrorReady()) {
-                hostBridge.beginStreamBubble(store.snapshot.sharedCard?.characterName || hostBridge.binding?.characterName || '角色');
-            }
-            if (type === EventType.GENERATION_PROGRESSED && typeof payload?.text === 'string') {
+            // 气泡推迟到第一帧流式文本才创建：generation.started 必然先于房主
+            // 那句发言的 publish 到达（酒馆先广播生成开始才写用户消息），此刻
+            // 建气泡会把随后落地的发言挤到气泡下面；而首帧 token 要等 AI 网络
+            // 响应，届时发言早已写入，顺序天然正确。
+            if (type === EventType.GENERATION_PROGRESSED && typeof payload?.text === 'string' && guestMirrorReady()) {
+                if (!hostBridge.hasStreamBubble()) {
+                    hostBridge.beginStreamBubble(store.snapshot.sharedCard?.characterName || hostBridge.binding?.characterName || '角色');
+                }
                 hostBridge.updateStreamBubble(payload.text);
             }
             if (type === EventType.GENERATION_FINISHED) {
