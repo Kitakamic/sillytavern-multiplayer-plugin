@@ -922,31 +922,39 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
     const windowEl = $(`
         <div id="${WINDOW_ID}" style="display: none;">
             <div class="stmp-window-header">
-                <span class="stmp-window-title">联机酒馆</span>
+                <div class="stmp-brand">
+                    <span class="stmp-brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><circle cx="16" cy="8" r="2.5"/><circle cx="12" cy="16" r="2.5"/><path d="M10 9.5l1.2 4M14 9.5l-1.2 4M10.2 8h3.6"/></svg></span>
+                    <span class="stmp-window-title">联机酒馆</span>
+                </div>
                 <span class="stmp-window-conn"></span>
-                <button class="stmp-window-close" title="收起">×</button>
+                <button type="button" class="stmp-window-close" title="收起" aria-label="收起">×</button>
             </div>
             <div class="stmp-window-body">
                 <div class="stmp-view-lobby">
+                    <div class="stmp-lobby-hero">
+                        <div class="stmp-lobby-hero-title">好友私房联机</div>
+                        <div class="stmp-lobby-hero-sub">每人用自己的本地 ST，经中继同步故事。房主负责 AI 生成，客人实时镜像。</div>
+                    </div>
                     <div class="stmp-section">
                         <div class="stmp-section-title">加入房间</div>
                         <textarea class="stmp-invite-input text_pole" rows="2" placeholder="粘贴朋友发来的邀请码"></textarea>
-                        <button class="stmp-join menu_button">凭邀请码入房</button>
+                        <button type="button" class="stmp-join menu_button stmp-btn-primary">凭邀请码入房</button>
                     </div>
                     <div class="stmp-section">
                         <div class="stmp-section-title">创建房间（房主）</div>
                         <input class="stmp-creator-key text_pole" type="password" placeholder="中继房主密钥（不会保存）">
-                        <button class="stmp-create menu_button">建房</button>
+                        <button type="button" class="stmp-create menu_button">建房</button>
                     </div>
                     <div class="stmp-lobby-note"></div>
                 </div>
                 <div class="stmp-view-room" style="display: none;">
                     <div class="stmp-section stmp-room-meta">
                         <div class="stmp-room-line"></div>
-                        <div class="stmp-generating" style="display: none;">⚙️ 房主正在生成……</div>
+                        <span class="stmp-role-badge" data-role="host">HOST</span>
+                        <div class="stmp-generating" style="display: none;">房主正在生成……</div>
                     </div>
                     <div class="stmp-section stmp-sync-section" style="display: none;">
-                        <button class="stmp-sync-all menu_button">一键同步（角色卡 + 存档）</button>
+                        <button type="button" class="stmp-sync-all menu_button">一键同步（角色卡 + 存档）</button>
                         <div class="stmp-sync-note stmp-empty">把当前打开的卡和聊天进度同步给全体成员，开局前点一次即可。</div>
                     </div>
                     <div class="stmp-section stmp-invite-section" style="display: none;">
@@ -1009,7 +1017,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
                         <div class="stmp-timeline"></div>
                     </details>
                     <div class="stmp-row stmp-room-actions">
-                        <button class="stmp-leave menu_button">离开房间</button>
+                        <button type="button" class="stmp-leave menu_button stmp-btn-danger">离开房间</button>
                     </div>
                 </div>
             </div>
@@ -1043,8 +1051,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
 
     // ---------- 悬浮球 ----------
     const ballEl = $(`
-        <div id="stmp-ball" data-state="idle" title="联机酒馆">
-            <i class="fa-solid fa-circle-nodes"></i>
+        <div id="stmp-ball" data-state="idle" title="联机酒馆" role="button" tabindex="0" aria-label="打开联机酒馆">
+            <span class="stmp-ball-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><circle cx="16" cy="8" r="2.5"/><circle cx="12" cy="16" r="2.5"/><path d="M10 9.5l1.2 4M14 9.5l-1.2 4M10.2 8h3.6"/></svg></span>
             <span class="stmp-ball-dot"></span>
         </div>
     `);
@@ -1246,6 +1254,8 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         const snapshot = store.snapshot;
         const connLabel = STATE_LABELS[relay.state] ?? relay.state;
         windowEl.find('.stmp-window-conn').text(connLabel);
+        windowEl.attr('data-state', relay.state);
+        panel.attr('data-state', relay.state);
         panel.find('#st-multiplayer-status').text(connLabel);
         ballEl.attr('data-state', relay.state);
         ballEl.attr('title', `联机酒馆 · ${connLabel}`);
@@ -1261,7 +1271,10 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
         }
 
         const isHost = snapshot.room.role === 'host';
-        windowEl.find('.stmp-room-line').text(`房间 ${snapshot.room.roomId} · 你是${isHost ? '房主' : '客人'}`);
+        windowEl.find('.stmp-room-line').text(`房间 ${snapshot.room.roomId}`);
+        windowEl.find('.stmp-role-badge')
+            .attr('data-role', isHost ? 'host' : 'guest')
+            .text(isHost ? 'HOST' : 'GUEST');
         windowEl.find('.stmp-generating').toggle(snapshot.generating);
 
         windowEl.find('.stmp-invite-section').toggle(isHost && Boolean(lastInviteCode));
@@ -1348,7 +1361,7 @@ export function mountMultiplayerPanel({ settings, store, relay, hostBridge, card
             $('<span class="stmp-member-name">').text(member.displayName).appendTo(row);
             $('<span class="stmp-member-role">').text(member.role === 'host' ? '房主' : '客人').appendTo(row);
             if (isHost && member.clientId !== snapshot.room.selfClientId) {
-                $('<button class="stmp-kick menu_button stmp-mini">踢出</button>')
+                $('<button type="button" class="stmp-kick menu_button stmp-mini">踢出</button>')
                     .attr('data-client-id', member.clientId)
                     .attr('data-name', member.displayName)
                     .appendTo(row);
